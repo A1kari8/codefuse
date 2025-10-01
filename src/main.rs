@@ -104,6 +104,96 @@ struct Backend {
     root_uri: Mutex<Option<Url>>,
 }
 
+/// Backend 结构体的辅助方法实现
+impl Backend {
+    /// 根据范围过滤语义令牌
+    ///
+    /// 语义令牌使用相对位置编码，需要解码为绝对位置后进行范围过滤
+    ///
+    /// # Arguments
+    ///
+    /// * `tokens` - 完整的语义令牌数组
+    /// * `range` - 需要过滤的范围
+    ///
+    /// # Returns
+    ///
+    /// 返回指定范围内的语义令牌数组
+    fn filter_tokens_by_range(&self, tokens: &[SemanticToken], range: Range) -> Vec<SemanticToken> {
+        let mut filtered_tokens = Vec::new();
+        let mut current_line = 0u32;
+        let mut current_char = 0u32;
+
+        for token in tokens {
+            // 计算令牌的绝对位置
+            if token.delta_line > 0 {
+                current_line += token.delta_line;
+                current_char = token.delta_start;
+            } else {
+                current_char += token.delta_start;
+            }
+
+            let token_end_char = current_char + token.length;
+            
+            // 检查令牌是否在指定范围内
+            let token_in_range = 
+                // 令牌开始位置在范围内
+                (current_line > range.start.line || 
+                 (current_line == range.start.line && current_char >= range.start.character)) &&
+                // 令牌结束位置在范围内  
+                (current_line < range.end.line ||
+                 (current_line == range.end.line && token_end_char <= range.end.character));
+
+            if token_in_range {
+                filtered_tokens.push(*token);
+            }
+        }
+
+        // 重新计算相对位置编码
+        self.recalculate_relative_positions(filtered_tokens)
+    }
+
+    /// 重新计算语义令牌的相对位置编码
+    ///
+    /// 由于过滤后的令牌需要重新计算相对位置，这个方法将绝对位置转换回相对位置
+    fn recalculate_relative_positions(&self, mut tokens: Vec<SemanticToken>) -> Vec<SemanticToken> {
+        if tokens.is_empty() {
+            return tokens;
+        }
+
+        let mut prev_line = 0u32;
+        let mut prev_char = 0u32;
+        let mut current_line = 0u32;
+        let mut current_char = 0u32;
+
+        for token in &mut tokens {
+            // 计算当前令牌的绝对位置
+            if token.delta_line > 0 {
+                current_line += token.delta_line;
+                current_char = token.delta_start;
+            } else {
+                current_char += token.delta_start;
+            }
+
+            // 重新计算相对位置
+            let new_delta_line = current_line - prev_line;
+            let new_delta_start = if new_delta_line > 0 {
+                current_char
+            } else {
+                current_char - prev_char
+            };
+
+            token.delta_line = new_delta_line;
+            token.delta_start = new_delta_start;
+
+            // 更新前一个位置
+            prev_line = current_line;
+            prev_char = current_char;
+        }
+
+        tokens
+    }
+}
+
 /// Backend 的 LanguageServer trait 实现
 /// 
 /// 实现了完整的 LSP 协议方法，包括初始化、悬停信息、代码补全、
@@ -257,7 +347,7 @@ impl LanguageServer for Backend {
                                     SemanticTokenModifier::DEFAULT_LIBRARY,
                                 ],
                             },
-                            range: Some(true),
+                            range: Some(true),   // 启用范围语义令牌
                             full: Some(SemanticTokensFullOptions::Bool(true)),
                             ..Default::default()
                         },
@@ -774,6 +864,67 @@ impl LanguageServer for Backend {
             })))
         } else {
             Ok(None)
+        }
+    }
+
+    /// 获取指定范围的语义令牌
+    ///
+    /// 当客户端请求文档某个范围的语义令牌时调用。对于 clangd，
+    /// 我们通常获取整个文档的语义令牌，然后过滤出指定范围内的令牌。
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - 语义令牌范围请求参数
+    ///   - `text_document`: 目标文档标识
+    ///   - `range`: 请求的文档范围
+    ///
+    /// # Returns
+    ///
+    /// 返回指定范围内的语义令牌，如果无法获取则返回 None
+    async fn semantic_tokens_range(
+        &self,
+        params: SemanticTokensRangeParams,
+    ) -> Result<Option<SemanticTokensRangeResult>, tower_lsp::jsonrpc::Error> {
+        let file_uri = params.text_document.uri.to_string();
+        let range = params.range;
+
+        self.client
+            .log_message(
+                MessageType::INFO,
+                &format!(
+                    "semantic tokens range for {} ({}:{} to {}:{})",
+                    file_uri,
+                    range.start.line,
+                    range.start.character,
+                    range.end.line,
+                    range.end.character
+                ),
+            )
+            .await;
+
+        // 对于 clangd，我们获取完整的语义令牌，然后过滤范围
+        // 这是因为 clangd 通常提供整个文档的语义令牌
+        let full_params = SemanticTokensParams {
+            text_document: params.text_document,
+            work_done_progress_params: params.work_done_progress_params,
+            partial_result_params: params.partial_result_params,
+        };
+
+        match self.semantic_tokens_full(full_params).await? {
+            Some(SemanticTokensResult::Tokens(full_tokens)) => {
+                // 过滤出指定范围内的令牌
+                let filtered_tokens = self.filter_tokens_by_range(&full_tokens.data, range);
+                
+                Ok(Some(SemanticTokensRangeResult::Tokens(SemanticTokens {
+                    result_id: full_tokens.result_id,
+                    data: filtered_tokens,
+                })))
+            }
+            Some(SemanticTokensResult::Partial(_)) => {
+                // 处理部分结果的情况（通常不会在我们的实现中出现）
+                Ok(None)
+            }
+            None => Ok(None),
         }
     }
 

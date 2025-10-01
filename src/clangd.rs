@@ -255,61 +255,7 @@ impl ClangdSession {
         }
     }
 
-    /// 从 clangd 读取一个完整的 LSP 响应消息
-    ///
-    /// 这个方法解析 LSP 协议的消息格式：
-    /// 1. 读取所有头部行直到遇到空行
-    /// 2. 从头部中解析 Content-Length 值
-    /// 3. 按照指定长度读取 JSON 消息体
-    /// 4. 解析 JSON 并返回
-    ///
-    /// # Returns
-    ///
-    /// 成功时返回解析后的 JSON 值，失败时返回 I/O 错误
-    ///
-    /// # Errors
-    ///
-    /// 在以下情况下会返回错误：
-    /// - 读取 clangd 输出失败
-    /// - 无法解析 Content-Length 头部
-    /// - JSON 格式不正确
-    /// - clangd 进程意外终止
-    ///
-    /// # LSP 消息格式
-    ///
-    /// ```text
-    /// Content-Length: 85\r\n
-    /// \r\n
-    /// {"jsonrpc":"2.0","id":1,"result":{"contents":{"kind":"markdown","value":"hover info"}}}
-    /// ```
-    pub async fn read_response(&mut self) -> Result<serde_json::Value, std::io::Error> {
-        let mut headers = String::new();
-        loop {
-            let mut line = String::new();
-            let bytes = self.reader.read_line(&mut line).await?;
-            if bytes == 0 {
-                break;
-            }
-            if line.trim().is_empty() {
-                break;
-            }
-            headers.push_str(&line);
-        }
 
-        // 解析 Content-Length
-        let content_length = headers
-            .lines()
-            .find(|line| line.to_lowercase().starts_with("content-length:"))
-            .and_then(|line| line.split(':').nth(1))
-            .and_then(|val| val.trim().parse::<usize>().ok())
-            .unwrap_or(0);
-
-        // 读取 body
-        let mut body = vec![0u8; content_length];
-        self.reader.read_exact(&mut body).await?;
-        let json: serde_json::Value = serde_json::from_slice(&body)?;
-        Ok(json)
-    }
 
     /// 发送 LSP 请求到 clangd 并等待匹配的响应
     ///
@@ -472,81 +418,22 @@ impl ClangdSession {
 /// 这个实现将 ClangdSession 的内部方法封装为统一的 LspServer 接口，
 /// 使得上层代码可以通过统一的接口与不同的语言服务器交互。
 ///
-/// 注意：这里的方法实现与上面的内部方法几乎相同，
-/// 这种重复可以通过重构来消除。
+/// trait 实现方法直接委托给相应的内部实现方法，避免代码重复。
 #[async_trait::async_trait]
 impl LspServer for ClangdSession {
     async fn send_hover(&mut self, file_uri: &str, line: u32, character: u32) -> String {
-        let id = self.id.fetch_add(1, Ordering::SeqCst);
-        let payload = format!(
-            r#"{{
-            "jsonrpc": "2.0",
-            "id": {},
-            "method": "textDocument/hover",
-            "params": {{
-                "textDocument": {{ "uri": "{}" }},
-                "position": {{ "line": {}, "character": {} }}
-            }}
-        }}"#,
-            id, file_uri, line, character
-        );
-
-        let request = format!("Content-Length: {}\r\n\r\n{}", payload.len(), payload);
-
-        match self.send_request(&request, id).await {
-            Ok(response) => response,
-            Err(e) => format!("error: {}", e),
-        }
+        ClangdSession::send_hover(self, file_uri, line, character).await
     }
 
     async fn send_completion(&mut self, file_uri: &str, line: u32, character: u32) -> String {
-        let id = self.id.fetch_add(1, Ordering::SeqCst);
-        let payload = format!(
-            r#"{{
-            "jsonrpc": "2.0",
-            "id": {},
-            "method": "textDocument/completion",
-            "params": {{
-                "textDocument": {{ "uri": "{}" }},
-                "position": {{ "line": {}, "character": {} }}
-            }}
-        }}"#,
-            id, file_uri, line, character
-        );
-
-        let request = format!("Content-Length: {}\r\n\r\n{}", payload.len(), payload);
-
-        match self.send_request(&request, id).await {
-            Ok(response) => response,
-            Err(e) => format!("error: {}", e),
-        }
+        ClangdSession::send_completion(self, file_uri, line, character).await
     }
 
     async fn send_semantic_tokens(&mut self, file_uri: &str) -> String {
-        let id = self.id.fetch_add(1, Ordering::SeqCst);
-        let payload = format!(
-            r#"{{
-            "jsonrpc": "2.0",
-            "id": {},
-            "method": "textDocument/semanticTokens/full",
-            "params": {{
-                "textDocument": {{ "uri": "{}" }}
-            }}
-        }}"#,
-            id, file_uri
-        );
-
-        let request = format!("Content-Length: {}\r\n\r\n{}", payload.len(), payload);
-
-        match self.send_request(&request, id).await {
-            Ok(response) => response,
-            Err(e) => format!("error: {}", e),
-        }
+        ClangdSession::send_semantic_tokens(self, file_uri).await
     }
 
     async fn send_notification(&mut self, notification: &str) -> Result<(), std::io::Error> {
-        self.stdin.write_all(notification.as_bytes()).await?;
-        self.stdin.flush().await?;
-        Ok(())
+        ClangdSession::send_notification(self, notification).await
     }
 }
