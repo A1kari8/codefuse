@@ -90,4 +90,20 @@ impl LspServer for MockLspServer {
     async fn send_notification(&mut self, _notification: &str) -> Result<(), std::io::Error> {
         Ok(())
     }
+
+    /// 发送请求并返回模拟的响应
+    /// 
+    /// 这个方法模拟向 LSP 服务器发送请求的功能。
+    /// 在模拟实现中，返回一个固定的初始化响应。
+    /// 
+    /// # Arguments
+    /// 
+    /// * `_request` - 要发送的请求消息（在模拟实现中未使用）
+    /// 
+    /// # Returns
+    /// 
+    /// 返回模拟的响应字符串
+    async fn send_request(&mut self, _request: &str) -> Result<String, std::io::Error> {
+        Ok(r#"{"jsonrpc": "2.0", "id": 1, "result": {"capabilities": {"hoverProvider": true, "textDocumentSync": {"change": 2}, "completionProvider": {"triggerCharacters": [".", "::"]}}}}"#.to_string())
+    }
 }

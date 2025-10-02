@@ -436,4 +436,9 @@ impl LspServer for ClangdSession {
     async fn send_notification(&mut self, notification: &str) -> Result<(), std::io::Error> {
         ClangdSession::send_notification(self, notification).await
     }
+
+    async fn send_request(&mut self, request: &str) -> Result<String, std::io::Error> {
+        let id = self.id.fetch_add(1, Ordering::SeqCst);
+        ClangdSession::send_request(self, request, id).await
+    }
 }

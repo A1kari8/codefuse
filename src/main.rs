@@ -264,21 +264,99 @@ impl LanguageServer for Backend {
                     .await;
                 if let Some(session) = lock.as_mut() {
                     let init_payload = format!(
-                        r#"{{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {{"processId": null, "rootUri": {}, "capabilities": {{}}}}}}"#,
-                        root_uri_json
+                        r#"{{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {{"processId": {}, "rootUri": {}, "capabilities": {} }}}}"#,
+                        serde_json::to_string(&params.process_id).unwrap_or("null".to_string()),
+                        root_uri_json,
+                        serde_json::to_string(&params.capabilities).unwrap_or("{}".to_string())
                     );
                     let init_request = format!(
                         "Content-Length: {}\r\n\r\n{}",
                         init_payload.len(),
                         init_payload
                     );
-                    if let Err(e) = session.send_notification(&init_request).await {
-                        self.client
-                            .log_message(
-                                MessageType::ERROR,
-                                format!("Failed to send initialize to {}: {}", language, e),
-                            )
-                            .await;
+                    match session.send_request(&init_request).await {
+                        Ok(response) => {
+                            // 解析后端响应
+                            let parsed: serde_json::Value = serde_json::from_str(&response).unwrap_or_default();
+                            let backend_capabilities = parsed.get("result").and_then(|r| r.get("capabilities")).cloned().unwrap_or(serde_json::json!({}));
+                            
+                            // 尝试从后端能力构建代理能力
+                            let server_capabilities = serde_json::from_value(backend_capabilities).unwrap_or_else(|_| ServerCapabilities {
+                                hover_provider: Some(HoverProviderCapability::Simple(true)),
+                                text_document_sync: Some(TextDocumentSyncCapability::Kind(
+                                    TextDocumentSyncKind::INCREMENTAL,
+                                )),
+                                completion_provider: Some(CompletionOptions {
+                                    resolve_provider: Some(false),
+                                    trigger_characters: Some(vec![".".to_string(), "::".to_string()]),
+                                    ..Default::default()
+                                }),
+                                semantic_tokens_provider: Some(
+                                    SemanticTokensServerCapabilities::SemanticTokensOptions(
+                                        SemanticTokensOptions {
+                                            legend: SemanticTokensLegend {
+                                                token_types: vec![
+                                                    SemanticTokenType::NAMESPACE,
+                                                    SemanticTokenType::TYPE,
+                                                    SemanticTokenType::CLASS,
+                                                    SemanticTokenType::ENUM,
+                                                    SemanticTokenType::INTERFACE,
+                                                    SemanticTokenType::STRUCT,
+                                                    SemanticTokenType::TYPE_PARAMETER,
+                                                    SemanticTokenType::PARAMETER,
+                                                    SemanticTokenType::VARIABLE,
+                                                    SemanticTokenType::PROPERTY,
+                                                    SemanticTokenType::ENUM_MEMBER,
+                                                    SemanticTokenType::EVENT,
+                                                    SemanticTokenType::FUNCTION,
+                                                    SemanticTokenType::METHOD,
+                                                    SemanticTokenType::MACRO,
+                                                    SemanticTokenType::KEYWORD,
+                                                    SemanticTokenType::MODIFIER,
+                                                    SemanticTokenType::COMMENT,
+                                                    SemanticTokenType::STRING,
+                                                    SemanticTokenType::NUMBER,
+                                                    SemanticTokenType::REGEXP,
+                                                    SemanticTokenType::OPERATOR,
+                                                ],
+                                                token_modifiers: vec![
+                                                    SemanticTokenModifier::DECLARATION,
+                                                    SemanticTokenModifier::DEFINITION,
+                                                    SemanticTokenModifier::READONLY,
+                                                    SemanticTokenModifier::STATIC,
+                                                    SemanticTokenModifier::DEPRECATED,
+                                                    SemanticTokenModifier::ABSTRACT,
+                                                    SemanticTokenModifier::ASYNC,
+                                                    SemanticTokenModifier::MODIFICATION,
+                                                    SemanticTokenModifier::DOCUMENTATION,
+                                                    SemanticTokenModifier::DEFAULT_LIBRARY,
+                                                ],
+                                            },
+                                            range: Some(true),   // 启用范围语义令牌
+                                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                                            ..Default::default()
+                                        },
+                                    ),
+                                ),
+                                ..Default::default()
+                            });
+                            
+                            return Ok(InitializeResult {
+                                server_info: Some(ServerInfo {
+                                    name: "codefuse".to_string(),
+                                    version: Some("0.1.0".to_string()),
+                                }),
+                                capabilities: server_capabilities,
+                            });
+                        }
+                        Err(e) => {
+                            self.client
+                                .log_message(
+                                    MessageType::ERROR,
+                                    format!("Failed to send initialize to {}: {}", language, e),
+                                )
+                                .await;
+                        }
                     }
                 }
             }
@@ -291,9 +369,11 @@ impl LanguageServer for Backend {
                     .await;
             }
         }
+        
+        // 默认返回，如果后端失败或没有响应
         Ok(InitializeResult {
             server_info: Some(ServerInfo {
-                name: "mylsp".to_string(),
+                name: "codefuse".to_string(),
                 version: Some("0.1.0".to_string()),
             }),
             capabilities: ServerCapabilities {

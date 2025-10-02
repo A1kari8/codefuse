@@ -77,4 +77,23 @@ pub trait LspServer: Send + Sync {
     /// 
     /// 当底层 I/O 操作失败时返回 `std::io::Error`
     async fn send_notification(&mut self, notification: &str) -> Result<(), std::io::Error>;
+
+    /// 发送请求到语言服务器并等待响应
+    /// 
+    /// 请求是双向消息，期望服务器返回响应。用于需要服务器回复的操作，
+    /// 如初始化、文档符号查询等。
+    /// 
+    /// # Arguments
+    /// 
+    /// * `request` - 要发送的请求消息，应为完整的 LSP 格式消息
+    ///               包含 Content-Length 头部和 JSON 消息体
+    /// 
+    /// # Returns
+    /// 
+    /// 返回服务器的响应消息，作为 JSON 格式字符串
+    /// 
+    /// # Errors
+    /// 
+    /// 当底层 I/O 操作失败时返回 `std::io::Error`
+    async fn send_request(&mut self, request: &str) -> Result<String, std::io::Error>;
 }
