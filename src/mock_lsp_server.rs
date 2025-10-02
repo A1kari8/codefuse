@@ -106,4 +106,32 @@ impl LspServer for MockLspServer {
     async fn send_request(&mut self, _request: &str) -> Result<String, std::io::Error> {
         Ok(r#"{"jsonrpc": "2.0", "id": 1, "result": {"capabilities": {"hoverProvider": true, "textDocumentSync": {"change": 2}, "completionProvider": {"triggerCharacters": [".", "::"]}}}}"#.to_string())
     }
+
+    async fn send_document_symbol(&mut self, _file_uri: &str) -> String {
+        r#"{"jsonrpc": "2.0", "id": 4, "result": []}"#.to_string()
+    }
+
+    async fn send_code_action(&mut self, _file_uri: &str, _line: u32, _character: u32) -> String {
+        r#"{"jsonrpc": "2.0", "id": 5, "result": []}"#.to_string()
+    }
+
+    async fn send_document_link(&mut self, _file_uri: &str) -> String {
+        r#"{"jsonrpc": "2.0", "id": 6, "result": []}"#.to_string()
+    }
+
+    async fn send_folding_range(&mut self, _file_uri: &str) -> String {
+        r#"{"jsonrpc": "2.0", "id": 7, "result": []}"#.to_string()
+    }
+
+    async fn send_inlay_hint(&mut self, _file_uri: &str, _range_json: &str) -> String {
+        r#"{"jsonrpc": "2.0", "id": 8, "result": []}"#.to_string()
+    }
+
+    async fn send_document_highlight(&mut self, _file_uri: &str, _line: u32, _character: u32) -> String {
+        r#"{"jsonrpc": "2.0", "id": 9, "result": []}"#.to_string()
+    }
+
+    async fn send_rename(&mut self, _file_uri: &str, _line: u32, _character: u32, _new_name: &str) -> String {
+        r#"{"jsonrpc": "2.0", "id": 10, "result": null}"#.to_string()
+    }
 }

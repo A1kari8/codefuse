@@ -438,7 +438,112 @@ impl LspServer for ClangdSession {
     }
 
     async fn send_request(&mut self, request: &str) -> Result<String, std::io::Error> {
+        // 从请求中解析ID
+        let expected_id = if let Some(id_line) = request.lines().find(|line| line.contains("\"id\":")) {
+            if let Some(id_str) = id_line.split("\"id\":").nth(1) {
+                if let Some(id_str) = id_str.split(",").next().or_else(|| id_str.split("}").next()) {
+                    id_str.trim().trim_matches('"').parse::<u32>().unwrap_or(1)
+                } else {
+                    1
+                }
+            } else {
+                1
+            }
+        } else {
+            1
+        };
+
+        ClangdSession::send_request(self, request, expected_id).await
+    }
+
+    async fn send_document_symbol(&mut self, file_uri: &str) -> String {
         let id = self.id.fetch_add(1, Ordering::SeqCst);
-        ClangdSession::send_request(self, request, id).await
+        let payload = format!(
+            r#"{{"jsonrpc": "2.0", "id": {}, "method": "textDocument/documentSymbol", "params": {{"textDocument": {{"uri": "{}"}}}}}}"#,
+            id, file_uri
+        );
+        let request = format!("Content-Length: {}\r\n\r\n{}", payload.len(), payload);
+        match ClangdSession::send_request(self, &request, id).await {
+            Ok(response) => response,
+            Err(e) => format!("error: {}", e),
+        }
+    }
+
+    async fn send_code_action(&mut self, file_uri: &str, line: u32, character: u32) -> String {
+        let id = self.id.fetch_add(1, Ordering::SeqCst);
+        let payload = format!(
+            r#"{{"jsonrpc": "2.0", "id": {}, "method": "textDocument/codeAction", "params": {{"textDocument": {{"uri": "{}"}}, "range": {{"start": {{"line": {}, "character": {}}}, "end": {{"line": {}, "character": {}}}}}, "context": {{"diagnostics": []}}}}}}"#,
+            id, file_uri, line, character, line, character
+        );
+        let request = format!("Content-Length: {}\r\n\r\n{}", payload.len(), payload);
+        match ClangdSession::send_request(self, &request, id).await {
+            Ok(response) => response,
+            Err(e) => format!("error: {}", e),
+        }
+    }
+
+    async fn send_document_link(&mut self, file_uri: &str) -> String {
+        let id = self.id.fetch_add(1, Ordering::SeqCst);
+        let payload = format!(
+            r#"{{"jsonrpc": "2.0", "id": {}, "method": "textDocument/documentLink", "params": {{"textDocument": {{"uri": "{}"}}}}}}"#,
+            id, file_uri
+        );
+        let request = format!("Content-Length: {}\r\n\r\n{}", payload.len(), payload);
+        match ClangdSession::send_request(self, &request, id).await {
+            Ok(response) => response,
+            Err(e) => format!("error: {}", e),
+        }
+    }
+
+    async fn send_folding_range(&mut self, file_uri: &str) -> String {
+        let id = self.id.fetch_add(1, Ordering::SeqCst);
+        let payload = format!(
+            r#"{{"jsonrpc": "2.0", "id": {}, "method": "textDocument/foldingRange", "params": {{"textDocument": {{"uri": "{}"}}}}}}"#,
+            id, file_uri
+        );
+        let request = format!("Content-Length: {}\r\n\r\n{}", payload.len(), payload);
+        match ClangdSession::send_request(self, &request, id).await {
+            Ok(response) => response,
+            Err(e) => format!("error: {}", e),
+        }
+    }
+
+    async fn send_inlay_hint(&mut self, file_uri: &str, range_json: &str) -> String {
+        let id = self.id.fetch_add(1, Ordering::SeqCst);
+        let payload = format!(
+            r#"{{"jsonrpc": "2.0", "id": {}, "method": "textDocument/inlayHint", "params": {{"textDocument": {{"uri": "{}"}}, "range": {}}}}}"#,
+            id, file_uri, range_json
+        );
+        let request = format!("Content-Length: {}\r\n\r\n{}", payload.len(), payload);
+        match ClangdSession::send_request(self, &request, id).await {
+            Ok(response) => response,
+            Err(e) => format!("error: {}", e),
+        }
+    }
+
+    async fn send_document_highlight(&mut self, file_uri: &str, line: u32, character: u32) -> String {
+        let id = self.id.fetch_add(1, Ordering::SeqCst);
+        let payload = format!(
+            r#"{{"jsonrpc": "2.0", "id": {}, "method": "textDocument/documentHighlight", "params": {{"textDocument": {{"uri": "{}"}}, "position": {{"line": {}, "character": {}}}}}}}"#,
+            id, file_uri, line, character
+        );
+        let request = format!("Content-Length: {}\r\n\r\n{}", payload.len(), payload);
+        match ClangdSession::send_request(self, &request, id).await {
+            Ok(response) => response,
+            Err(e) => format!("error: {}", e),
+        }
+    }
+
+    async fn send_rename(&mut self, file_uri: &str, line: u32, character: u32, new_name: &str) -> String {
+        let id = self.id.fetch_add(1, Ordering::SeqCst);
+        let payload = format!(
+            r#"{{"jsonrpc": "2.0", "id": {}, "method": "textDocument/rename", "params": {{"textDocument": {{"uri": "{}"}}, "position": {{"line": {}, "character": {}}}, "newName": "{}"}}}}"#,
+            id, file_uri, line, character, new_name
+        );
+        let request = format!("Content-Length: {}\r\n\r\n{}", payload.len(), payload);
+        match ClangdSession::send_request(self, &request, id).await {
+            Ok(response) => response,
+            Err(e) => format!("error: {}", e),
+        }
     }
 }

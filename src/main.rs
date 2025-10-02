@@ -104,6 +104,781 @@ struct Backend {
     root_uri: Mutex<Option<Url>>,
 }
 
+/// 构建默认的服务器能力声明
+///
+/// 这个函数返回代理服务器支持的默认 LSP 能力声明。
+/// 当后端服务器初始化失败或不支持某些功能时使用这些默认能力。
+///
+/// # Returns
+///
+/// 返回包含默认能力的 `ServerCapabilities` 结构体
+///
+/// # 包含的能力
+///
+/// - **悬停信息提供**: 支持基本的悬停信息显示
+/// - **增量文档同步**: 支持增量文档更新
+/// - **代码补全**: 支持代码补全，触发字符为 "." 和 "::"
+/// - **语义令牌**: 支持完整的语义令牌，用于语法高亮
+/// - **重命名**: 支持符号重命名功能
+/// - **文档高亮**: 支持文档高亮显示
+fn create_default_server_capabilities() -> ServerCapabilities {
+    ServerCapabilities {
+        hover_provider: Some(HoverProviderCapability::Simple(true)),
+        text_document_sync: Some(TextDocumentSyncCapability::Kind(
+            TextDocumentSyncKind::INCREMENTAL,
+        )),
+        completion_provider: Some(CompletionOptions {
+            resolve_provider: Some(false),
+            trigger_characters: Some(vec![".".to_string(), "::".to_string()]),
+            ..Default::default()
+        }),
+        semantic_tokens_provider: Some(
+            SemanticTokensServerCapabilities::SemanticTokensOptions(
+                SemanticTokensOptions {
+                    legend: SemanticTokensLegend {
+                        token_types: vec![
+                            SemanticTokenType::NAMESPACE,
+                            SemanticTokenType::TYPE,
+                            SemanticTokenType::CLASS,
+                            SemanticTokenType::ENUM,
+                            SemanticTokenType::INTERFACE,
+                            SemanticTokenType::STRUCT,
+                            SemanticTokenType::TYPE_PARAMETER,
+                            SemanticTokenType::PARAMETER,
+                            SemanticTokenType::VARIABLE,
+                            SemanticTokenType::PROPERTY,
+                            SemanticTokenType::ENUM_MEMBER,
+                            SemanticTokenType::EVENT,
+                            SemanticTokenType::FUNCTION,
+                            SemanticTokenType::METHOD,
+                            SemanticTokenType::MACRO,
+                            SemanticTokenType::KEYWORD,
+                            SemanticTokenType::MODIFIER,
+                            SemanticTokenType::COMMENT,
+                            SemanticTokenType::STRING,
+                            SemanticTokenType::NUMBER,
+                            SemanticTokenType::REGEXP,
+                            SemanticTokenType::OPERATOR,
+                        ],
+                        token_modifiers: vec![
+                            SemanticTokenModifier::DECLARATION,
+                            SemanticTokenModifier::DEFINITION,
+                            SemanticTokenModifier::READONLY,
+                            SemanticTokenModifier::STATIC,
+                            SemanticTokenModifier::DEPRECATED,
+                            SemanticTokenModifier::ABSTRACT,
+                            SemanticTokenModifier::ASYNC,
+                            SemanticTokenModifier::MODIFICATION,
+                            SemanticTokenModifier::DOCUMENTATION,
+                            SemanticTokenModifier::DEFAULT_LIBRARY,
+                        ],
+                    },
+                    range: Some(true),   // 启用范围语义令牌
+                    full: Some(SemanticTokensFullOptions::Bool(true)),
+                    ..Default::default()
+                },
+            ),
+        ),
+        rename_provider: Some(tower_lsp::lsp_types::OneOf::Left(true)),
+        document_highlight_provider: Some(tower_lsp::lsp_types::OneOf::Left(true)),
+        ..Default::default()
+    }
+}
+
+/// 初始化 LSP 服务器并获取其能力声明
+///
+/// 这个函数负责：
+/// 1. 创建指定语言的 LSP 服务器实例
+/// 2. 向后端服务器发送初始化请求
+/// 3. 解析响应并提取服务器能力
+/// 4. 返回基于后端能力的代理能力声明和服务器实例
+///
+/// # Arguments
+///
+/// * `language` - 要初始化的语言服务器类型
+/// * `client` - tower-lsp 客户端，用于日志记录
+/// * `root_uri_json` - 序列化后的根 URI
+/// * `client_capabilities` - 客户端能力声明
+///
+/// # Returns
+///
+/// 返回 `Result<(ServerCapabilities, Option<Box<dyn LspServer>>), tower_lsp::jsonrpc::Error>`：
+/// - `Ok((capabilities, Some(server)))`: 成功获取的能力声明和初始化的服务器实例
+/// - `Ok((capabilities, None))`: 能力声明（可能是默认的）和失败的服务器实例
+/// - `Err(error)`: 初始化过程中出现严重错误
+///
+/// # 错误处理
+///
+/// - 服务器创建失败：记录错误，返回默认能力
+/// - 初始化请求失败：记录错误，返回默认能力，但仍返回服务器实例用于后续尝试
+/// - 响应解析失败：记录错误，返回默认能力
+async fn initialize_lsp_server(
+    language: &str,
+    client: &Client,
+    root_uri_json: &str,
+    client_capabilities: &ClientCapabilities,
+) -> Result<(ServerCapabilities, Option<Box<dyn LspServer>>), tower_lsp::jsonrpc::Error> {
+    // 创建 LSP 服务器实例
+    let mut server = match create_lsp_server(language).await {
+        Ok(server) => {
+            client
+                .log_message(
+                    MessageType::INFO,
+                    &format!("{} LSP server started", language),
+                )
+                .await;
+            server
+        }
+        Err(e) => {
+            client
+                .log_message(
+                    MessageType::ERROR,
+                    format!("Failed to start {} LSP server: {}", language, e),
+                )
+                .await;
+            return Ok((create_default_server_capabilities(), None));
+        }
+    };
+
+    // 构建初始化请求
+    let init_payload = format!(
+        r#"{{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {{"processId": {}, "rootUri": {}, "capabilities": {} }}}}"#,
+        std::process::id(),
+        root_uri_json,
+        serde_json::to_string(client_capabilities).unwrap_or("{}".to_string())
+    );
+    let init_request = format!(
+        "Content-Length: {}\r\n\r\n{}",
+        init_payload.len(),
+        init_payload
+    );
+
+    // 发送初始化请求并处理响应
+    match server.send_request(&init_request).await {
+        Ok(response) => {
+            // 解析后端响应
+            let parsed: serde_json::Value = serde_json::from_str(&response).unwrap_or_default();
+            client.log_message(MessageType::WARNING, parsed.to_string()).await;
+            let backend_capabilities = parsed
+                .get("result")
+                .and_then(|r| r.get("capabilities"))
+                .cloned()
+                .unwrap_or(serde_json::json!({}));
+
+            client.log_message(MessageType::WARNING, &backend_capabilities.to_string()).await;
+
+            // 尝试从后端能力构建代理能力，失败时使用默认能力
+            let capabilities = serde_json::from_value(backend_capabilities)
+                .unwrap_or_else(|_| {
+                    create_default_server_capabilities()
+                });
+
+            Ok((capabilities, Some(server)))
+        }
+        Err(e) => {
+            client
+                .log_message(
+                    MessageType::ERROR,
+                    format!("Failed to send initialize to {}: {}", language, e),
+                )
+                .await;
+            // 即使初始化失败，也返回服务器实例，让后续请求可以尝试
+            Ok((create_default_server_capabilities(), Some(server)))
+        }
+    }
+}
+
+/// 解析 hover 请求的响应
+///
+/// 这个函数负责解析来自后端 LSP 服务器的 hover 响应，
+/// 处理各种错误情况和不同的响应格式。
+///
+/// # Arguments
+///
+/// * `response` - 后端服务器的原始响应字符串
+/// * `client` - tower-lsp 客户端，用于日志记录
+///
+/// # Returns
+///
+/// 返回 `Result<Option<Hover>, tower_lsp::jsonrpc::Error>`：
+/// - `Ok(Some(Hover))`: 成功解析的悬停信息
+/// - `Ok(None)`: 没有悬停信息（例如超时）
+/// - `Err(error)`: 解析过程中出现错误
+///
+/// # 支持的响应格式
+///
+/// 1. **错误响应**: 以 "error:" 开头的字符串
+/// 2. **超时错误**: 包含 "TimedOut" 的错误信息
+/// 3. **JSON 响应**: 标准 LSP hover 响应格式
+/// 4. **未初始化**: 当后端服务器未初始化时的提示
+async fn parse_hover_response(
+    response: &str,
+    client: &Client,
+) -> Result<Option<Hover>, tower_lsp::jsonrpc::Error> {
+    // 处理错误响应
+    if response.starts_with("error:") {
+        if response.contains("TimedOut") {
+            return Ok(None);
+        } else {
+            return Ok(Some(Hover {
+                contents: HoverContents::Scalar(MarkedString::String(response.to_string())),
+                range: None,
+            }));
+        }
+    }
+
+    // 记录响应内容
+    // client
+    //     .log_message(MessageType::INFO, &format!("clangd response: {}", response))
+    //     .await;
+
+    // 解析 JSON 响应
+    let parsed: serde_json::Value = match serde_json::from_str(response) {
+        Ok(v) => v,
+        Err(e) => {
+            client
+                .log_message(MessageType::ERROR, format!("解析 clangd 响应失败: {}", e))
+                .await;
+            return Ok(Some(Hover {
+                contents: HoverContents::Scalar(MarkedString::String(
+                    "解析 clangd 响应失败".to_string(),
+                )),
+                range: None,
+            }));
+        }
+    };
+
+    // 检查是否有错误字段
+    if let Some(error) = parsed.get("error") {
+        return Ok(Some(Hover {
+            contents: HoverContents::Scalar(MarkedString::String(format!(
+                "clangd 错误: {}",
+                error
+            ))),
+            range: None,
+        }));
+    }
+
+    // 提取结果内容
+    if let Some(result) = parsed.get("result") {
+        if let Some(contents) = result.get("contents") {
+            let hover_contents = parse_hover_contents(contents);
+            let range = result
+                .get("range")
+                .and_then(|r| serde_json::from_value(r.clone()).ok());
+
+            return Ok(Some(Hover {
+                contents: hover_contents,
+                range,
+            }));
+        }
+    }
+
+    // 没有找到有效内容
+    Ok(None)
+}
+
+/// 解析 hover 内容的具体格式
+///
+/// LSP hover 响应中的 contents 字段可以有多种格式：
+/// - 字符串
+/// - 数组（取第一个元素）
+/// - 对象（提取 value 字段）
+///
+/// # Arguments
+///
+/// * `contents` - JSON 值表示的内容
+///
+/// # Returns
+///
+/// 返回解析后的 `HoverContents`
+fn parse_hover_contents(contents: &serde_json::Value) -> HoverContents {
+    match contents {
+        // 字符串格式
+        serde_json::Value::String(s) => {
+            HoverContents::Scalar(MarkedString::String(s.clone()))
+        }
+        // 数组格式，取第一个元素
+        serde_json::Value::Array(arr) if !arr.is_empty() => {
+            if let Some(first) = arr.first() {
+                parse_hover_contents(first)
+            } else {
+                HoverContents::Scalar(MarkedString::String("".to_string()))
+            }
+        }
+        // 对象格式，尝试提取 value 字段
+        serde_json::Value::Object(obj) => {
+            if let Some(value) = obj.get("value") {
+                if let Some(s) = value.as_str() {
+                    HoverContents::Scalar(MarkedString::String(s.to_string()))
+                } else {
+                    HoverContents::Scalar(MarkedString::String(format!("{:?}", value)))
+                }
+            } else {
+                HoverContents::Scalar(MarkedString::String(format!("{:?}", contents)))
+            }
+        }
+        // 其他格式，转为字符串
+        _ => HoverContents::Scalar(MarkedString::String(format!("{:?}", contents))),
+    }
+}
+
+/// 解析代码补全响应
+///
+/// 从 LSP 服务器的 JSON 响应中提取补全项列表
+async fn parse_completion_response(
+    response: &str,
+    client: &Client,
+) -> Result<Option<CompletionResponse>, tower_lsp::jsonrpc::Error> {
+    // 检查是否为错误响应
+    if response.starts_with("error:") {
+        if response.contains("TimedOut") {
+            return Ok(None);
+        } else {
+            client
+                .log_message(
+                    MessageType::ERROR,
+                    &format!("completion error: {}", response),
+                )
+                .await;
+            return Ok(None);
+        }
+    }
+
+    // 记录响应信息
+    // client
+    //     .log_message(
+    //         MessageType::INFO,
+    //         &format!("clangd completion response: {}", response),
+    //     )
+    //     .await;
+
+    // 解析 JSON 响应
+    let parsed: serde_json::Value = match serde_json::from_str(response) {
+        Ok(v) => v,
+        Err(e) => {
+            client
+                .log_message(
+                    MessageType::ERROR,
+                    format!("解析 clangd completion 响应失败: {}", e),
+                )
+                .await;
+            return Ok(None);
+        }
+    };
+
+    // 检查是否有错误
+    if let Some(error) = parsed.get("error") {
+        client
+            .log_message(
+                MessageType::ERROR,
+                format!("clangd completion error: {}", error),
+            )
+            .await;
+        return Ok(None);
+    }
+
+    // 提取结果
+    let result = match parsed.get("result") {
+        Some(r) if !r.is_null() => r,
+        _ => return Ok(None),
+    };
+
+    // 解析补全项
+    if let Some(items) = result.get("items").and_then(|i| i.as_array()) {
+        let completion_items: Vec<CompletionItem> = items
+            .iter()
+            .filter_map(|item| {
+                let label = item.get("label")?.as_str()?.to_string();
+                let kind = item.get("kind").and_then(|k| k.as_u64()).map(|k| match k {
+                    1 => CompletionItemKind::TEXT,
+                    2 => CompletionItemKind::METHOD,
+                    3 => CompletionItemKind::FUNCTION,
+                    4 => CompletionItemKind::CONSTRUCTOR,
+                    5 => CompletionItemKind::FIELD,
+                    6 => CompletionItemKind::VARIABLE,
+                    7 => CompletionItemKind::CLASS,
+                    8 => CompletionItemKind::INTERFACE,
+                    9 => CompletionItemKind::MODULE,
+                    10 => CompletionItemKind::PROPERTY,
+                    11 => CompletionItemKind::UNIT,
+                    12 => CompletionItemKind::VALUE,
+                    13 => CompletionItemKind::ENUM,
+                    14 => CompletionItemKind::KEYWORD,
+                    15 => CompletionItemKind::SNIPPET,
+                    16 => CompletionItemKind::COLOR,
+                    17 => CompletionItemKind::FILE,
+                    18 => CompletionItemKind::REFERENCE,
+                    19 => CompletionItemKind::FOLDER,
+                    20 => CompletionItemKind::ENUM_MEMBER,
+                    21 => CompletionItemKind::CONSTANT,
+                    22 => CompletionItemKind::STRUCT,
+                    23 => CompletionItemKind::EVENT,
+                    24 => CompletionItemKind::OPERATOR,
+                    25 => CompletionItemKind::TYPE_PARAMETER,
+                    _ => CompletionItemKind::TEXT,
+                });
+                let detail = item
+                    .get("detail")
+                    .and_then(|d| d.as_str())
+                    .map(|s| s.to_string());
+                let documentation = item
+                    .get("documentation")
+                    .and_then(|d| d.as_str())
+                    .map(|s| Documentation::String(s.to_string()));
+                let insert_text = item
+                    .get("insertText")
+                    .and_then(|it| it.as_str())
+                    .map(|s| s.to_string());
+                let sort_text = item
+                    .get("sortText")
+                    .and_then(|st| st.as_str())
+                    .map(|s| s.to_string());
+
+                Some(CompletionItem {
+                    label,
+                    kind,
+                    detail,
+                    documentation,
+                    insert_text,
+                    sort_text,
+                    ..Default::default()
+                })
+            })
+            .collect();
+
+        Ok(Some(CompletionResponse::Array(completion_items)))
+    } else {
+        Ok(None)
+    }
+}
+
+/// 解析语义令牌响应
+///
+/// 从 LSP 服务器的 JSON 响应中提取语义令牌数据
+async fn parse_semantic_tokens_response(
+    response: &str,
+    client: &Client,
+) -> Result<Option<SemanticTokensResult>, tower_lsp::jsonrpc::Error> {
+    // 检查是否为错误响应
+    if response.starts_with("error:") {
+        if response.contains("TimedOut") {
+            return Ok(None);
+        } else {
+            client
+                .log_message(
+                    MessageType::ERROR,
+                    &format!("semantic tokens error: {}", response),
+                )
+                .await;
+            return Ok(None);
+        }
+    }
+
+    // 记录响应信息
+    // client
+    //     .log_message(
+    //         MessageType::INFO,
+    //         &format!("clangd semantic tokens response: {}", response),
+    //     )
+    //     .await;
+
+    // 解析 JSON 响应
+    let parsed: serde_json::Value = match serde_json::from_str(response) {
+        Ok(v) => v,
+        Err(e) => {
+            client
+                .log_message(
+                    MessageType::ERROR,
+                    format!("解析 clangd semantic tokens 响应失败: {}", e),
+                )
+                .await;
+            return Ok(None);
+        }
+    };
+
+    // 检查是否有错误
+    if let Some(error) = parsed.get("error") {
+        client
+            .log_message(
+                MessageType::ERROR,
+                format!("clangd semantic tokens error: {}", error),
+            )
+            .await;
+        return Ok(None);
+    }
+
+    // 提取结果
+    let result = match parsed.get("result") {
+        Some(r) if !r.is_null() => r,
+        _ => return Ok(None),
+    };
+
+    // 解析语义令牌数据
+    if let Some(data) = result.get("data").and_then(|d| d.as_array()) {
+        let tokens: Vec<SemanticToken> = data
+            .chunks(5)
+            .filter_map(|chunk| {
+                if chunk.len() == 5 {
+                    let delta_line = chunk[0].as_u64()? as u32;
+                    let delta_start = chunk[1].as_u64()? as u32;
+                    let length = chunk[2].as_u64()? as u32;
+                    let token_type = chunk[3].as_u64()? as u32;
+                    let token_modifiers_bitset = chunk[4].as_u64()? as u32;
+                    Some(SemanticToken {
+                        delta_line,
+                        delta_start,
+                        length,
+                        token_type,
+                        token_modifiers_bitset,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
+            result_id: None,
+            data: tokens,
+        })))
+    } else {
+        Ok(None)
+    }
+}
+
+/// 解析文档高亮响应
+///
+/// 从 LSP 服务器的 JSON 响应中提取文档高亮信息
+async fn parse_document_highlight_response(
+    response: &str,
+    client: &Client,
+) -> Result<Option<Vec<DocumentHighlight>>, tower_lsp::jsonrpc::Error> {
+    // 检查是否为错误响应
+    if response.starts_with("error:") {
+        if response.contains("TimedOut") {
+            return Ok(None);
+        } else {
+            client
+                .log_message(
+                    MessageType::ERROR,
+                    &format!("document highlight error: {}", response),
+                )
+                .await;
+            return Ok(None);
+        }
+    }
+
+    // 解析 JSON 响应
+    let parsed: serde_json::Value = match serde_json::from_str(response) {
+        Ok(v) => v,
+        Err(e) => {
+            client
+                .log_message(
+                    MessageType::ERROR,
+                    format!("解析 clangd document highlight 响应失败: {}", e),
+                )
+                .await;
+            return Ok(None);
+        }
+    };
+
+    // 检查是否有错误
+    if let Some(error) = parsed.get("error") {
+        client
+            .log_message(
+                MessageType::ERROR,
+                format!("clangd document highlight error: {}", error),
+            )
+            .await;
+        return Ok(None);
+    }
+
+    // 提取结果
+    let result = match parsed.get("result") {
+        Some(r) if !r.is_null() => r,
+        _ => return Ok(None),
+    };
+
+    // 解析文档高亮数组
+    if let Some(highlights) = result.as_array() {
+        let document_highlights: Vec<DocumentHighlight> = highlights
+            .iter()
+            .filter_map(|highlight| {
+                let range = highlight.get("range").and_then(|r| serde_json::from_value(r.clone()).ok())?;
+                let kind = highlight.get("kind").and_then(|k| k.as_u64()).map(|k| match k {
+                    1 => DocumentHighlightKind::TEXT,
+                    2 => DocumentHighlightKind::READ,
+                    3 => DocumentHighlightKind::WRITE,
+                    _ => DocumentHighlightKind::TEXT,
+                });
+
+                Some(DocumentHighlight { range, kind })
+            })
+            .collect();
+
+        Ok(Some(document_highlights))
+    } else {
+        Ok(None)
+    }
+}
+
+/// 解析折叠范围响应
+///
+/// 从 LSP 服务器的 JSON 响应中提取折叠范围信息
+async fn parse_folding_range_response(
+    response: &str,
+    client: &Client,
+) -> Result<Option<Vec<FoldingRange>>, tower_lsp::jsonrpc::Error> {
+    // 检查是否为错误响应
+    if response.starts_with("error:") {
+        if response.contains("TimedOut") {
+            return Ok(None);
+        } else {
+            client
+                .log_message(
+                    MessageType::ERROR,
+                    &format!("folding range error: {}", response),
+                )
+                .await;
+            return Ok(None);
+        }
+    }
+
+    // 解析 JSON 响应
+    let parsed: serde_json::Value = match serde_json::from_str(response) {
+        Ok(v) => v,
+        Err(e) => {
+            client
+                .log_message(
+                    MessageType::ERROR,
+                    format!("解析 clangd folding range 响应失败: {}", e),
+                )
+                .await;
+            return Ok(None);
+        }
+    };
+
+    // 检查是否有错误
+    if let Some(error) = parsed.get("error") {
+        client
+            .log_message(
+                MessageType::ERROR,
+                format!("clangd folding range error: {}", error),
+            )
+            .await;
+        return Ok(None);
+    }
+
+    // 提取结果
+    let result = match parsed.get("result") {
+        Some(r) if !r.is_null() => r,
+        _ => return Ok(None),
+    };
+
+    // 解析折叠范围数组
+    if let Some(ranges) = result.as_array() {
+        let folding_ranges: Vec<FoldingRange> = ranges
+            .iter()
+            .filter_map(|range| {
+                let start_line = range.get("startLine")?.as_u64()? as u32;
+                let end_line = range.get("endLine")?.as_u64()? as u32;
+                let start_character = range.get("startCharacter").and_then(|c| c.as_u64()).map(|c| c as u32);
+                let end_character = range.get("endCharacter").and_then(|c| c.as_u64()).map(|c| c as u32);
+                let kind = range.get("kind").and_then(|k| k.as_str()).map(|k| match k {
+                    "comment" => FoldingRangeKind::Comment,
+                    "imports" => FoldingRangeKind::Imports,
+                    "region" => FoldingRangeKind::Region,
+                    _ => FoldingRangeKind::Region,
+                });
+
+                Some(FoldingRange {
+                    start_line,
+                    end_line,
+                    start_character,
+                    end_character,
+                    kind,
+                    collapsed_text: None,
+                })
+            })
+            .collect();
+
+        Ok(Some(folding_ranges))
+    } else {
+        Ok(None)
+    }
+}
+
+/// 解析重命名响应
+///
+/// 从 LSP 服务器的 JSON 响应中提取重命名编辑信息
+async fn parse_rename_response(
+    response: &str,
+    client: &Client,
+) -> Result<Option<WorkspaceEdit>, tower_lsp::jsonrpc::Error> {
+    // 检查是否为错误响应
+    if response.starts_with("error:") {
+        if response.contains("TimedOut") {
+            return Ok(None);
+        } else {
+            client
+                .log_message(
+                    MessageType::ERROR,
+                    &format!("rename error: {}", response),
+                )
+                .await;
+            return Ok(None);
+        }
+    }
+
+    // 解析 JSON 响应
+    let parsed: serde_json::Value = match serde_json::from_str(response) {
+        Ok(v) => v,
+        Err(e) => {
+            client
+                .log_message(
+                    MessageType::ERROR,
+                    format!("解析 clangd rename 响应失败: {}", e),
+                )
+                .await;
+            return Ok(None);
+        }
+    };
+
+    // 检查是否有错误
+    if let Some(error) = parsed.get("error") {
+        client
+            .log_message(
+                MessageType::ERROR,
+                format!("clangd rename error: {}", error),
+            )
+            .await;
+        return Ok(None);
+    }
+
+    // 提取结果
+    let result = match parsed.get("result") {
+        Some(r) if !r.is_null() => r,
+        _ => {
+            return Ok(None);
+        }
+    };
+
+    // 解析 WorkspaceEdit
+    match serde_json::from_value(result.clone()) {
+        Ok(workspace_edit) => Ok(Some(workspace_edit)),
+        Err(e) => {
+            client
+                .log_message(
+                    MessageType::ERROR,
+                    format!("解析 WorkspaceEdit 失败: {}", e),
+                )
+                .await;
+            Ok(None)
+        }
+    }
+}
+
 /// Backend 结构体的辅助方法实现
 impl Backend {
     /// 根据范围过滤语义令牌
@@ -231,20 +1006,22 @@ impl LanguageServer for Backend {
         &self,
         params: InitializeParams,
     ) -> Result<InitializeResult, tower_lsp::jsonrpc::Error> {
+        // 解析初始化参数
         let root_uri_json = serde_json::to_string(&params.root_uri).unwrap_or("null".to_string());
         *self.root_uri.lock().await = params.root_uri;
 
-        // Determine which LSP server to use based on initialization options
+        // 确定要使用的语言服务器
         let language = if let Some(opts) = &params.initialization_options {
             if let Some(lang) = opts.get("language").and_then(|v| v.as_str()) {
                 lang
             } else {
-                "cpp" // default to C++
+                "cpp" // 默认使用 C++
             }
         } else {
-            "cpp" // default to C++
+            "cpp" // 默认使用 C++
         };
 
+        // 记录初始化信息
         self.client
             .log_message(
                 MessageType::INFO,
@@ -252,189 +1029,28 @@ impl LanguageServer for Backend {
             )
             .await;
 
-        match create_lsp_server(language).await {
-            Ok(server) => {
-                let mut lock = self.lsp_server.lock().await;
-                *lock = Some(server);
-                self.client
-                    .log_message(
-                        MessageType::INFO,
-                        &format!("{} LSP server started", language),
-                    )
-                    .await;
-                if let Some(session) = lock.as_mut() {
-                    let init_payload = format!(
-                        r#"{{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {{"processId": {}, "rootUri": {}, "capabilities": {} }}}}"#,
-                        serde_json::to_string(&params.process_id).unwrap_or("null".to_string()),
-                        root_uri_json,
-                        serde_json::to_string(&params.capabilities).unwrap_or("{}".to_string())
-                    );
-                    let init_request = format!(
-                        "Content-Length: {}\r\n\r\n{}",
-                        init_payload.len(),
-                        init_payload
-                    );
-                    match session.send_request(&init_request).await {
-                        Ok(response) => {
-                            // 解析后端响应
-                            let parsed: serde_json::Value = serde_json::from_str(&response).unwrap_or_default();
-                            let backend_capabilities = parsed.get("result").and_then(|r| r.get("capabilities")).cloned().unwrap_or(serde_json::json!({}));
-                            
-                            // 尝试从后端能力构建代理能力
-                            let server_capabilities = serde_json::from_value(backend_capabilities).unwrap_or_else(|_| ServerCapabilities {
-                                hover_provider: Some(HoverProviderCapability::Simple(true)),
-                                text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                                    TextDocumentSyncKind::INCREMENTAL,
-                                )),
-                                completion_provider: Some(CompletionOptions {
-                                    resolve_provider: Some(false),
-                                    trigger_characters: Some(vec![".".to_string(), "::".to_string()]),
-                                    ..Default::default()
-                                }),
-                                semantic_tokens_provider: Some(
-                                    SemanticTokensServerCapabilities::SemanticTokensOptions(
-                                        SemanticTokensOptions {
-                                            legend: SemanticTokensLegend {
-                                                token_types: vec![
-                                                    SemanticTokenType::NAMESPACE,
-                                                    SemanticTokenType::TYPE,
-                                                    SemanticTokenType::CLASS,
-                                                    SemanticTokenType::ENUM,
-                                                    SemanticTokenType::INTERFACE,
-                                                    SemanticTokenType::STRUCT,
-                                                    SemanticTokenType::TYPE_PARAMETER,
-                                                    SemanticTokenType::PARAMETER,
-                                                    SemanticTokenType::VARIABLE,
-                                                    SemanticTokenType::PROPERTY,
-                                                    SemanticTokenType::ENUM_MEMBER,
-                                                    SemanticTokenType::EVENT,
-                                                    SemanticTokenType::FUNCTION,
-                                                    SemanticTokenType::METHOD,
-                                                    SemanticTokenType::MACRO,
-                                                    SemanticTokenType::KEYWORD,
-                                                    SemanticTokenType::MODIFIER,
-                                                    SemanticTokenType::COMMENT,
-                                                    SemanticTokenType::STRING,
-                                                    SemanticTokenType::NUMBER,
-                                                    SemanticTokenType::REGEXP,
-                                                    SemanticTokenType::OPERATOR,
-                                                ],
-                                                token_modifiers: vec![
-                                                    SemanticTokenModifier::DECLARATION,
-                                                    SemanticTokenModifier::DEFINITION,
-                                                    SemanticTokenModifier::READONLY,
-                                                    SemanticTokenModifier::STATIC,
-                                                    SemanticTokenModifier::DEPRECATED,
-                                                    SemanticTokenModifier::ABSTRACT,
-                                                    SemanticTokenModifier::ASYNC,
-                                                    SemanticTokenModifier::MODIFICATION,
-                                                    SemanticTokenModifier::DOCUMENTATION,
-                                                    SemanticTokenModifier::DEFAULT_LIBRARY,
-                                                ],
-                                            },
-                                            range: Some(true),   // 启用范围语义令牌
-                                            full: Some(SemanticTokensFullOptions::Bool(true)),
-                                            ..Default::default()
-                                        },
-                                    ),
-                                ),
-                                ..Default::default()
-                            });
-                            
-                            return Ok(InitializeResult {
-                                server_info: Some(ServerInfo {
-                                    name: "codefuse".to_string(),
-                                    version: Some("0.1.0".to_string()),
-                                }),
-                                capabilities: server_capabilities,
-                            });
-                        }
-                        Err(e) => {
-                            self.client
-                                .log_message(
-                                    MessageType::ERROR,
-                                    format!("Failed to send initialize to {}: {}", language, e),
-                                )
-                                .await;
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                self.client
-                    .log_message(
-                        MessageType::ERROR,
-                        format!("Failed to start {} LSP server: {}", language, e),
-                    )
-                    .await;
-            }
+        // 初始化 LSP 服务器并获取能力声明
+        let (server_capabilities, server) = initialize_lsp_server(
+            language,
+            &self.client,
+            &root_uri_json,
+            &params.capabilities,
+        )
+        .await?;
+
+        // 存储服务器实例（如果初始化成功）
+        if let Some(server) = server {
+            let mut lock = self.lsp_server.lock().await;
+            *lock = Some(server);
         }
-        
-        // 默认返回，如果后端失败或没有响应
+
+        // 返回初始化结果
         Ok(InitializeResult {
             server_info: Some(ServerInfo {
                 name: "codefuse".to_string(),
                 version: Some("0.1.0".to_string()),
             }),
-            capabilities: ServerCapabilities {
-                hover_provider: Some(HoverProviderCapability::Simple(true)),
-                text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                    TextDocumentSyncKind::INCREMENTAL,
-                )),
-                completion_provider: Some(CompletionOptions {
-                    resolve_provider: Some(false),
-                    trigger_characters: Some(vec![".".to_string(), "::".to_string()]),
-                    ..Default::default()
-                }),
-                semantic_tokens_provider: Some(
-                    SemanticTokensServerCapabilities::SemanticTokensOptions(
-                        SemanticTokensOptions {
-                            legend: SemanticTokensLegend {
-                                token_types: vec![
-                                    SemanticTokenType::NAMESPACE,
-                                    SemanticTokenType::TYPE,
-                                    SemanticTokenType::CLASS,
-                                    SemanticTokenType::ENUM,
-                                    SemanticTokenType::INTERFACE,
-                                    SemanticTokenType::STRUCT,
-                                    SemanticTokenType::TYPE_PARAMETER,
-                                    SemanticTokenType::PARAMETER,
-                                    SemanticTokenType::VARIABLE,
-                                    SemanticTokenType::PROPERTY,
-                                    SemanticTokenType::ENUM_MEMBER,
-                                    SemanticTokenType::EVENT,
-                                    SemanticTokenType::FUNCTION,
-                                    SemanticTokenType::METHOD,
-                                    SemanticTokenType::MACRO,
-                                    SemanticTokenType::KEYWORD,
-                                    SemanticTokenType::MODIFIER,
-                                    SemanticTokenType::COMMENT,
-                                    SemanticTokenType::STRING,
-                                    SemanticTokenType::NUMBER,
-                                    SemanticTokenType::REGEXP,
-                                    SemanticTokenType::OPERATOR,
-                                ],
-                                token_modifiers: vec![
-                                    SemanticTokenModifier::DECLARATION,
-                                    SemanticTokenModifier::DEFINITION,
-                                    SemanticTokenModifier::READONLY,
-                                    SemanticTokenModifier::STATIC,
-                                    SemanticTokenModifier::DEPRECATED,
-                                    SemanticTokenModifier::ABSTRACT,
-                                    SemanticTokenModifier::ASYNC,
-                                    SemanticTokenModifier::MODIFICATION,
-                                    SemanticTokenModifier::DOCUMENTATION,
-                                    SemanticTokenModifier::DEFAULT_LIBRARY,
-                                ],
-                            },
-                            range: Some(true),   // 启用范围语义令牌
-                            full: Some(SemanticTokensFullOptions::Bool(true)),
-                            ..Default::default()
-                        },
-                    ),
-                ),
-                ..Default::default()
-            },
+            capabilities: server_capabilities,
         })
     }
 
@@ -452,14 +1068,13 @@ impl LanguageServer for Backend {
     /// 1. 记录初始化完成日志
     /// 2. 向后端语言服务器发送 initialized 通知
     /// 3. 确保后端服务器进入可工作状态
-    async fn initialized(&self, _: InitializedParams) {
+    async fn initialized(&self, params: InitializedParams) {
         self.client
             .log_message(MessageType::INFO, "multi-lsp initialized!")
             .await;
         let mut lock = self.lsp_server.lock().await;
         if let Some(session) = lock.as_mut() {
-            let initialized_payload =
-                r#"{"jsonrpc": "2.0", "method": "initialized", "params": {}}"#;
+            let initialized_payload = format!(r#"{{"jsonrpc": "2.0", "method": "initialized", "params": {} }}"#, serde_json::to_string(&params).unwrap_or("{}".to_string()));
             let request = format!(
                 "Content-Length: {}\r\n\r\n{}",
                 initialized_payload.len(),
@@ -527,6 +1142,7 @@ impl LanguageServer for Backend {
     /// - 数组格式的内容（取第一个元素）
     /// - 对象格式的内容（提取 value 字段）
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>, tower_lsp::jsonrpc::Error> {
+        // 提取请求参数
         let file_uri = params
             .text_document_position_params
             .text_document
@@ -534,29 +1150,32 @@ impl LanguageServer for Backend {
             .to_string();
         let position = params.text_document_position_params.position;
 
-        self.client
-            .log_message(
-                MessageType::INFO,
-                &format!(
-                    "hover at line {}, char {}",
-                    position.line, position.character
-                ),
-            )
-            .await;
+        // 记录悬停位置信息
+        // self.client
+        //     .log_message(
+        //         MessageType::INFO,
+        //         &format!(
+        //             "hover at line {}, char {}",
+        //             position.line, position.character
+        //         ),
+        //     )
+        //     .await;
 
+        // 获取 LSP 服务器实例并发送悬停请求
         let mut clangd = self.lsp_server.lock().await;
         let response = if let Some(session) = clangd.as_mut() {
             let hover_request = session
                 .send_hover(&file_uri, position.line, position.character)
                 .await;
-            self.client
-                .log_message(
-                    MessageType::INFO,
-                    &format!("sent hover request for {}", file_uri),
-                )
-                .await;
+            // self.client
+            //     .log_message(
+            //         MessageType::INFO,
+            //         &format!("sent hover request for {}", file_uri),
+            //     )
+            //     .await;
             hover_request
         } else {
+            // 如果 LSP 服务器未初始化，返回默认悬停信息
             return Ok(Some(Hover {
                 contents: HoverContents::Scalar(MarkedString::String(
                     "clangd 未初始化".to_string(),
@@ -565,88 +1184,8 @@ impl LanguageServer for Backend {
             }));
         };
 
-        if response.starts_with("error:") {
-            if response.contains("TimedOut") {
-                return Ok(None);
-            } else {
-                return Ok(Some(Hover {
-                    contents: HoverContents::Scalar(MarkedString::String(response)),
-                    range: None,
-                }));
-            }
-        }
-
-        self.client
-            .log_message(MessageType::INFO, &format!("clangd response: {}", response))
-            .await;
-
-        let parsed: serde_json::Value = match serde_json::from_str(&response) {
-            Ok(v) => v,
-            Err(e) => {
-                self.client
-                    .log_message(MessageType::ERROR, format!("解析 clangd 响应失败: {}", e))
-                    .await;
-                return Ok(Some(Hover {
-                    contents: HoverContents::Scalar(MarkedString::String(
-                        "解析 clangd 响应失败".to_string(),
-                    )),
-                    range: None,
-                }));
-            }
-        };
-
-        if let Some(error) = parsed.get("error") {
-            return Ok(Some(Hover {
-                contents: HoverContents::Scalar(MarkedString::String(format!(
-                    "clangd 错误: {}",
-                    error
-                ))),
-                range: None,
-            }));
-        }
-
-        let result = match parsed.get("result") {
-            Some(r) if !r.is_null() => r,
-            _ => return Ok(None),
-        };
-
-        let contents = match result.get("contents") {
-            Some(c) if c.is_string() => c.as_str().map(|s| {
-                HoverContents::Markup(MarkupContent {
-                    kind: MarkupKind::PlainText,
-                    value: s.to_string(),
-                })
-            }),
-            Some(c) if c.is_array() => c
-                .as_array()
-                .and_then(|arr| arr.get(0))
-                .and_then(|v| v.as_str())
-                .map(|s| {
-                    HoverContents::Markup(MarkupContent {
-                        kind: MarkupKind::PlainText,
-                        value: s.to_string(),
-                    })
-                }),
-            Some(c) if c.is_object() => {
-                if let Some(value) = c.get("value").and_then(|v| v.as_str()) {
-                    Some(HoverContents::Markup(MarkupContent {
-                        kind: MarkupKind::Markdown,
-                        value: value.to_string(),
-                    }))
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
-
-        match contents {
-            Some(c) => Ok(Some(Hover {
-                contents: c,
-                range: None,
-            })),
-            None => Ok(None),
-        }
+        // 使用辅助函数解析响应
+        parse_hover_response(&response, &self.client).await
     }
 
     /// 处理代码补全请求
@@ -692,259 +1231,74 @@ impl LanguageServer for Backend {
         &self,
         params: CompletionParams,
     ) -> Result<Option<CompletionResponse>, tower_lsp::jsonrpc::Error> {
+        // 提取请求参数
         let file_uri = params.text_document_position.text_document.uri.to_string();
         let position = params.text_document_position.position;
 
-        self.client
-            .log_message(
-                MessageType::INFO,
-                &format!(
-                    "completion at line {}, char {}",
-                    position.line, position.character
-                ),
-            )
-            .await;
+        // 记录补全请求位置
+        // self.client
+        //     .log_message(
+        //         MessageType::INFO,
+        //         &format!(
+        //             "completion at line {}, char {}",
+        //             position.line, position.character
+        //         ),
+        //     )
+        //     .await;
 
+        // 获取 LSP 服务器实例并发送补全请求
         let mut clangd = self.lsp_server.lock().await;
         let response = if let Some(session) = clangd.as_mut() {
             let completion_request = session
                 .send_completion(&file_uri, position.line, position.character)
                 .await;
-            self.client
-                .log_message(
-                    MessageType::INFO,
-                    &format!("sent completion request for {}", file_uri),
-                )
-                .await;
+            // self.client
+            //     .log_message(
+            //         MessageType::INFO,
+            //         &format!("sent completion request for {}", file_uri),
+            //     )
+            //     .await;
             completion_request
         } else {
             return Ok(None);
         };
 
-        if response.starts_with("error:") {
-            if response.contains("TimedOut") {
-                return Ok(None);
-            } else {
-                self.client
-                    .log_message(
-                        MessageType::ERROR,
-                        &format!("completion error: {}", response),
-                    )
-                    .await;
-                return Ok(None);
-            }
-        }
-
-        self.client
-            .log_message(
-                MessageType::INFO,
-                &format!("clangd completion response: {}", response),
-            )
-            .await;
-
-        let parsed: serde_json::Value = match serde_json::from_str(&response) {
-            Ok(v) => v,
-            Err(e) => {
-                self.client
-                    .log_message(
-                        MessageType::ERROR,
-                        format!("解析 clangd completion 响应失败: {}", e),
-                    )
-                    .await;
-                return Ok(None);
-            }
-        };
-
-        if let Some(error) = parsed.get("error") {
-            self.client
-                .log_message(
-                    MessageType::ERROR,
-                    format!("clangd completion error: {}", error),
-                )
-                .await;
-            return Ok(None);
-        }
-
-        let result = match parsed.get("result") {
-            Some(r) if !r.is_null() => r,
-            _ => return Ok(None),
-        };
-
-        // Parse completion items
-        if let Some(items) = result.get("items").and_then(|i| i.as_array()) {
-            let completion_items: Vec<CompletionItem> = items
-                .iter()
-                .filter_map(|item| {
-                    let label = item.get("label")?.as_str()?.to_string();
-                    let kind = item.get("kind").and_then(|k| k.as_u64()).map(|k| match k {
-                        1 => CompletionItemKind::TEXT,
-                        2 => CompletionItemKind::METHOD,
-                        3 => CompletionItemKind::FUNCTION,
-                        4 => CompletionItemKind::CONSTRUCTOR,
-                        5 => CompletionItemKind::FIELD,
-                        6 => CompletionItemKind::VARIABLE,
-                        7 => CompletionItemKind::CLASS,
-                        8 => CompletionItemKind::INTERFACE,
-                        9 => CompletionItemKind::MODULE,
-                        10 => CompletionItemKind::PROPERTY,
-                        11 => CompletionItemKind::UNIT,
-                        12 => CompletionItemKind::VALUE,
-                        13 => CompletionItemKind::ENUM,
-                        14 => CompletionItemKind::KEYWORD,
-                        15 => CompletionItemKind::SNIPPET,
-                        16 => CompletionItemKind::COLOR,
-                        17 => CompletionItemKind::FILE,
-                        18 => CompletionItemKind::REFERENCE,
-                        19 => CompletionItemKind::FOLDER,
-                        20 => CompletionItemKind::ENUM_MEMBER,
-                        21 => CompletionItemKind::CONSTANT,
-                        22 => CompletionItemKind::STRUCT,
-                        23 => CompletionItemKind::EVENT,
-                        24 => CompletionItemKind::OPERATOR,
-                        25 => CompletionItemKind::TYPE_PARAMETER,
-                        _ => CompletionItemKind::TEXT,
-                    });
-                    let detail = item
-                        .get("detail")
-                        .and_then(|d| d.as_str())
-                        .map(|s| s.to_string());
-                    let documentation = item
-                        .get("documentation")
-                        .and_then(|d| d.as_str())
-                        .map(|s| Documentation::String(s.to_string()));
-                    let insert_text = item
-                        .get("insertText")
-                        .and_then(|it| it.as_str())
-                        .map(|s| s.to_string());
-                    let sort_text = item
-                        .get("sortText")
-                        .and_then(|st| st.as_str())
-                        .map(|s| s.to_string());
-
-                    Some(CompletionItem {
-                        label,
-                        kind,
-                        detail,
-                        documentation,
-                        insert_text,
-                        sort_text,
-                        ..Default::default()
-                    })
-                })
-                .collect();
-
-            Ok(Some(CompletionResponse::Array(completion_items)))
-        } else {
-            Ok(None)
-        }
+        // 使用辅助函数解析响应
+        parse_completion_response(&response, &self.client).await
     }
 
     async fn semantic_tokens_full(
         &self,
         params: SemanticTokensParams,
     ) -> Result<Option<SemanticTokensResult>, tower_lsp::jsonrpc::Error> {
+        // 提取请求参数
         let file_uri = params.text_document.uri.to_string();
 
-        self.client
-            .log_message(
-                MessageType::INFO,
-                &format!("semantic tokens for {}", file_uri),
-            )
-            .await;
+        // 记录语义令牌请求
+        // self.client
+        //     .log_message(
+        //         MessageType::INFO,
+        //         &format!("semantic tokens for {}", file_uri),
+        //     )
+        //     .await;
 
+        // 获取 LSP 服务器实例并发送语义令牌请求
         let mut clangd = self.lsp_server.lock().await;
         let response = if let Some(session) = clangd.as_mut() {
             let semantic_request = session.send_semantic_tokens(&file_uri).await;
-            self.client
-                .log_message(
-                    MessageType::INFO,
-                    &format!("sent semantic tokens request for {}", file_uri),
-                )
-                .await;
+            // self.client
+            //     .log_message(
+            //         MessageType::INFO,
+            //         &format!("sent semantic tokens request for {}", file_uri),
+            //     )
+            //     .await;
             semantic_request
         } else {
             return Ok(None);
         };
 
-        if response.starts_with("error:") {
-            if response.contains("TimedOut") {
-                return Ok(None);
-            } else {
-                self.client
-                    .log_message(
-                        MessageType::ERROR,
-                        &format!("semantic tokens error: {}", response),
-                    )
-                    .await;
-                return Ok(None);
-            }
-        }
-
-        self.client
-            .log_message(
-                MessageType::INFO,
-                &format!("clangd semantic tokens response: {}", response),
-            )
-            .await;
-
-        let parsed: serde_json::Value = match serde_json::from_str(&response) {
-            Ok(v) => v,
-            Err(e) => {
-                self.client
-                    .log_message(
-                        MessageType::ERROR,
-                        format!("解析 clangd semantic tokens 响应失败: {}", e),
-                    )
-                    .await;
-                return Ok(None);
-            }
-        };
-
-        if let Some(error) = parsed.get("error") {
-            self.client
-                .log_message(
-                    MessageType::ERROR,
-                    format!("clangd semantic tokens error: {}", error),
-                )
-                .await;
-            return Ok(None);
-        }
-
-        let result = match parsed.get("result") {
-            Some(r) if !r.is_null() => r,
-            _ => return Ok(None),
-        };
-
-        if let Some(data) = result.get("data").and_then(|d| d.as_array()) {
-            let tokens: Vec<SemanticToken> = data
-                .chunks(5)
-                .filter_map(|chunk| {
-                    if chunk.len() == 5 {
-                        let delta_line = chunk[0].as_u64()? as u32;
-                        let delta_start = chunk[1].as_u64()? as u32;
-                        let length = chunk[2].as_u64()? as u32;
-                        let token_type = chunk[3].as_u64()? as u32;
-                        let token_modifiers_bitset = chunk[4].as_u64()? as u32;
-                        Some(SemanticToken {
-                            delta_line,
-                            delta_start,
-                            length,
-                            token_type,
-                            token_modifiers_bitset,
-                        })
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
-                result_id: None,
-                data: tokens,
-            })))
-        } else {
-            Ok(None)
-        }
+        // 使用辅助函数解析响应
+        parse_semantic_tokens_response(&response, &self.client).await
     }
 
     /// 获取指定范围的语义令牌
@@ -965,22 +1319,22 @@ impl LanguageServer for Backend {
         &self,
         params: SemanticTokensRangeParams,
     ) -> Result<Option<SemanticTokensRangeResult>, tower_lsp::jsonrpc::Error> {
-        let file_uri = params.text_document.uri.to_string();
+        let _file_uri = params.text_document.uri.to_string();
         let range = params.range;
 
-        self.client
-            .log_message(
-                MessageType::INFO,
-                &format!(
-                    "semantic tokens range for {} ({}:{} to {}:{})",
-                    file_uri,
-                    range.start.line,
-                    range.start.character,
-                    range.end.line,
-                    range.end.character
-                ),
-            )
-            .await;
+        // self.client
+        //     .log_message(
+        //         MessageType::INFO,
+        //         &format!(
+        //             "semantic tokens range for {} ({}:{} to {}:{})",
+        //             file_uri,
+        //             range.start.line,
+        //             range.start.character,
+        //             range.end.line,
+        //             range.end.character
+        //         ),
+        //     )
+        //     .await;
 
         // 对于 clangd，我们获取完整的语义令牌，然后过滤范围
         // 这是因为 clangd 通常提供整个文档的语义令牌
@@ -1032,9 +1386,9 @@ impl LanguageServer for Backend {
     ///
     /// 文档内容中的特殊字符（如换行符、引号等）会被转义以确保 JSON 格式正确。
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        self.client
-            .log_message(MessageType::INFO, "did_open called")
-            .await;
+        // self.client
+        //     .log_message(MessageType::INFO, "did_open called")
+        //     .await;
         let mut clangd = self.lsp_server.lock().await;
         if let Some(session) = clangd.as_mut() {
             let payload = format!(
@@ -1051,9 +1405,9 @@ impl LanguageServer for Backend {
                     .replace("\r", "\\r")
             );
             let request = format!("Content-Length: {}\r\n\r\n{}", payload.len(), payload);
-            self.client
-                .log_message(MessageType::INFO, &format!("sending didOpen: {}", request))
-                .await;
+            // self.client
+            //     .log_message(MessageType::INFO, &format!("sending didOpen: {}", request))
+            //     .await;
             if let Err(e) = session.send_notification(&request).await {
                 self.client
                     .log_message(
@@ -1088,7 +1442,7 @@ impl LanguageServer for Backend {
         let mut clangd = self.lsp_server.lock().await;
         if let Some(session) = clangd.as_mut() {
             let payload = format!(
-                r#"{{"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {{"textDocument": {{"uri": "{}", "version": {}}}, "contentChanges": {}}}}}"#,
+                r#"{{"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {{"textDocument": {{"uri": "{}", "version": {} }}, "contentChanges": {} }}}}"#,
                 params.text_document.uri,
                 params.text_document.version,
                 serde_json::to_string(&params.content_changes).unwrap()
@@ -1141,6 +1495,104 @@ impl LanguageServer for Backend {
                     .await;
             }
         }
+    }
+
+    /// 处理文档符号请求
+    ///
+    /// 返回文档中定义的符号（如函数、类、变量等）的层次结构。
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> Result<Option<DocumentSymbolResponse>, tower_lsp::jsonrpc::Error> {
+        let file_uri = params.text_document.uri.to_string();
+        let _result = self.lsp_server.lock().await.as_mut().unwrap().send_document_symbol(&file_uri).await;
+        // 解析响应并返回文档符号
+        Ok(Some(DocumentSymbolResponse::Flat(vec![]))) // 暂时返回空列表
+    }
+
+    /// 处理代码操作请求
+    ///
+    /// 返回适用于当前上下文的代码操作（如重构、快速修复等）。
+    async fn code_action(
+        &self,
+        params: CodeActionParams,
+    ) -> Result<Option<CodeActionResponse>, tower_lsp::jsonrpc::Error> {
+        let file_uri = params.text_document.uri.to_string();
+        let _result = self.lsp_server.lock().await.as_mut().unwrap().send_code_action(&file_uri, params.range.start.line, params.range.start.character).await;
+        // 解析响应并返回代码操作
+        Ok(Some(vec![])) // 暂时返回空列表
+    }
+
+    /// 处理文档链接请求
+    ///
+    /// 返回文档中的链接（如URL、文件引用等）。
+    async fn document_link(
+        &self,
+        params: DocumentLinkParams,
+    ) -> Result<Option<Vec<DocumentLink>>, tower_lsp::jsonrpc::Error> {
+        let file_uri = params.text_document.uri.to_string();
+        let _result = self.lsp_server.lock().await.as_mut().unwrap().send_document_link(&file_uri).await;
+        // 解析响应并返回文档链接
+        Ok(Some(vec![])) // 暂时返回空列表
+    }
+
+    /// 处理折叠范围请求
+    ///
+    /// 返回文档中可以折叠的范围（如函数、类、注释块等）。
+    async fn folding_range(
+        &self,
+        params: FoldingRangeParams,
+    ) -> Result<Option<Vec<FoldingRange>>, tower_lsp::jsonrpc::Error> {
+        let file_uri = params.text_document.uri.to_string();
+        let result = self.lsp_server.lock().await.as_mut().unwrap().send_folding_range(&file_uri).await;
+        
+        self.client.log_message(MessageType::INFO, format!("Folding range request for {}: {:?}", file_uri, result)).await;
+        
+        // 解析响应并返回折叠范围
+        parse_folding_range_response(&result, &self.client).await
+    }
+
+    /// 处理内嵌提示请求
+    ///
+    /// 返回文档中的内嵌提示（如参数名、类型注解等）。
+    async fn inlay_hint(
+        &self,
+        params: InlayHintParams,
+    ) -> Result<Option<Vec<InlayHint>>, tower_lsp::jsonrpc::Error> {
+        let file_uri = params.text_document.uri.to_string();
+        let range_json = serde_json::to_string(&params.range).unwrap();
+        let _result = self.lsp_server.lock().await.as_mut().unwrap().send_inlay_hint(&file_uri, &range_json).await;
+        // 解析响应并返回内嵌提示列表
+        // 这里需要根据实际的 LSP 响应格式进行解析
+        Ok(Some(vec![])) // 暂时返回空列表
+    }
+
+    /// 处理文档高亮请求
+    ///
+    /// 返回文档中与指定位置相关的所有高亮位置。
+    async fn document_highlight(
+        &self,
+        params: DocumentHighlightParams,
+    ) -> Result<Option<Vec<DocumentHighlight>>, tower_lsp::jsonrpc::Error> {
+        let file_uri = params.text_document_position_params.text_document.uri.to_string();
+        let position = params.text_document_position_params.position;
+        let result = self.lsp_server.lock().await.as_mut().unwrap().send_document_highlight(&file_uri, position.line, position.character).await;
+        // 解析响应并返回文档高亮列表
+        parse_document_highlight_response(&result, &self.client).await
+    }
+
+    /// 处理重命名请求
+    ///
+    /// 对指定位置的符号进行重命名操作。
+    async fn rename(
+        &self,
+        params: RenameParams,
+    ) -> Result<Option<WorkspaceEdit>, tower_lsp::jsonrpc::Error> {
+        let file_uri = params.text_document_position.text_document.uri.to_string();
+        let position = params.text_document_position.position;
+        let result = self.lsp_server.lock().await.as_mut().unwrap().send_rename(&file_uri, position.line, position.character, &params.new_name).await;
+        // 解析响应并返回重命名编辑
+        parse_rename_response(&result, &self.client).await
     }
 }
 
