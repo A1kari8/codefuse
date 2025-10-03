@@ -8,6 +8,18 @@ CodeFuse 是一个基于 Rust 的 LSP (Language Server Protocol) 代理服务器
 - 支持注册自定义处理器来修改请求和响应
 - 异步处理，支持高并发
 - 基于 tokio 的异步运行时
+- 编译时类型安全的处理器注册
+
+## 依赖
+
+CodeFuse 依赖以下主要 crate：
+
+- `tokio`: 异步运行时
+- `tower-lsp`: LSP 类型定义和协议处理
+- `serde_json`: JSON 序列化和反序列化
+- `futures`: 异步 Future 工具
+- `anyhow`: 错误处理
+- `dashmap`: 并发安全的 HashMap
 
 ## 使用
 
@@ -18,11 +30,10 @@ CodeFuse 作为 LSP 服务器运行，可以配置在 VSCode 中使用
 ```txt
 src/
 ├── main.rs          # 主入口点，设置异步任务和处理器
-├── dispatcher.rs    # 消息分发器，负责注册和处理 LSP 消息
+├── dispatcher.rs    # 消息分发器，负责注册和处理 LSP 消息（请求和通知）
 ├── clangd_client.rs # clangd 客户端，负责启动和管理 clangd 进程
 ├── tasks.rs         # 异步任务函数，处理数据收发
-├── handlers.rs      # LSP 消息处理器，定义具体的处理逻辑
-└── lib.rs           # 库文件（如果需要）
+└── handlers.rs      # LSP 消息处理器，定义具体的处理逻辑
 ```
 
 ## 如何编写代码
@@ -46,6 +57,7 @@ use futures::future::BoxFuture;
 use tokio::sync::mpsc;
 use serde_json::Value;
 use anyhow::Result;
+use tower_lsp::lsp_types::{InitializeResult, ServerInfo};
 
 fn handle_initialize(
     rpc: Value,
@@ -83,24 +95,6 @@ fn handle_initialize(
 }
 ```
 
-#### 注册处理器
-
-在 `setup_handlers` 函数中注册处理器：
-
-```rust
-pub async fn setup_handlers(dispatcher: Arc<Dispatcher>) {
-    // 注册从后端（clangd）到前端（VSCode）的处理器
-    dispatcher
-        .register_from_backend("initialize", handle_initialize)
-        .await;
-
-    // 注册从前端（VSCode）到后端（clangd）的处理器
-    dispatcher
-        .register_from_frontend("textDocument/hover", handle_hover)
-        .await;
-}
-```
-
 #### 处理器签名
 
 处理器函数的签名如下：
@@ -112,6 +106,22 @@ fn(Value, UnboundedSender<String>) -> BoxFuture<'static, Result<()>>
 - `Value`: 接收到的 JSON-RPC 消息
 - `UnboundedSender<String>`: 用于发送格式化的 LSP 消息
 - 返回: `BoxFuture<'static, Result<()>>` 的 Future
+
+所有处理器都使用相同的签名，无论处理请求还是通知
+
+#### 注册方法
+
+注册方法使用 tower-lsp 的请求和通知类型作为类型参数：
+
+```rust
+// 请求处理器
+dispatcher.register_req_resp_from_backend::<Initialize>(handler).await;      // 处理初始化响应
+dispatcher.register_req_from_frontend::<HoverRequest>(handler).await;   // 处理悬停请求
+
+// 通知处理器
+dispatcher.register_notification_from_frontend::<DidOpenTextDocument>(handler).await;  // 处理文档打开通知
+dispatcher.register_notification_from_backend::<PublishDiagnostics>(handler).await;    // 处理诊断通知
+```
 
 #### 消息格式
 
@@ -152,44 +162,32 @@ fn handle_your_method(
 }
 ```
 
-### 示例：增强悬停信息
+### 示例：处理文档打开通知
 
 ```rust
-fn handle_hover(
+use tower_lsp::lsp_types::DidOpenTextDocumentParams;
+use serde_json::json;
+
+fn handle_did_open(
     rpc: Value,
-    frontend_sender: mpsc::UnboundedSender<String>,
+    backend_sender: mpsc::UnboundedSender<String>,
 ) -> BoxFuture<'static, Result<()>> {
     Box::pin(async move {
-        let mut raw_rpc = rpc.clone();
-        let raw_result = rpc.get("result").cloned().unwrap_or(json!(null));
+        // 解析文档打开通知
+        if let Ok(params) = serde_json::from_value::<DidOpenTextDocumentParams>(rpc.get("params").cloned().unwrap_or(json!(null))) {
+            info!("Document opened: {}", params.text_document.uri);
 
-        // 解析为 Hover 类型
-        if let Ok(mut hover) = serde_json::from_value::<Hover>(raw_result) {
-            // 增强悬停内容
-            match &mut hover.contents {
-                HoverContents::Scalar(MarkedString::String(s)) => {
-                    s.push_str("\n\n---\nEnhanced by CodeFuse");
-                }
-                HoverContents::Array(arr) => {
-                    arr.push(MarkedString::String("Enhanced by CodeFuse".into()));
-                }
-                _ => {}
-            }
-
-            let edited = serde_json::to_value(hover)?;
-            if let Some(obj) = raw_rpc.as_object_mut() {
-                obj.insert("result".to_string(), edited);
-            }
+            // 可以在这里进行一些处理，比如语法检查等
+            // 然后转发给后端
+            let message = Dispatcher::format_lsp_message(&rpc)?;
+            backend_sender.send(message)?;
         }
-
-        let message = Dispatcher::format_lsp_message(&raw_rpc)?;
-        frontend_sender.send(message)?;
         Ok(())
     })
 }
 
 // 在 setup_handlers 中注册
 dispatcher
-    .register_from_backend("textDocument/hover", handle_hover)
+    .register_from_frontend_notification::<DidOpenTextDocument>(handle_did_open)
     .await;
 ```

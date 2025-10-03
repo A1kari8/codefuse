@@ -11,19 +11,19 @@
 
 mod clangd_client;
 mod dispatcher;
-mod tasks;
 mod handlers;
+mod tasks;
 
 use anyhow::Result;
 use log::{error, info};
 use std::sync::Arc;
-use tokio::sync::{Semaphore, mpsc};
 use tokio::io::BufReader;
+use tokio::sync::{Semaphore, mpsc};
 
 use crate::clangd_client::{ClangdClient, pipe_clangd_stderr};
 use crate::dispatcher::Dispatcher;
-use crate::tasks::*;
 use crate::handlers::setup_handlers;
+use crate::tasks::*;
 
 /// 主函数，程序的入口点。
 ///

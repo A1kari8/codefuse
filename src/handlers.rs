@@ -1,9 +1,9 @@
-use std::sync::Arc;
-use serde_json;
-use tower_lsp::lsp_types::{InitializeResult, ServerInfo};
-use tokio::sync::mpsc;
 use anyhow;
 use futures::future::BoxFuture;
+use serde_json;
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tower_lsp::lsp_types::{notification::{DidOpenTextDocument, Notification}, request::Initialize, InitializeResult, ServerInfo};
 
 use crate::dispatcher::Dispatcher;
 
@@ -65,35 +65,7 @@ fn handle_initialize(
 /// setup_handlers(dispatcher.clone()).await;
 /// ```
 pub async fn setup_handlers(dispatcher: Arc<Dispatcher>) {
-    // reg.register("textDocument/hover", move |params,clangd,vscode_out| {
-    //     async move {
-    //         let mut client = clangd.lock().await;
-    //         let raw_result = client.send_request("textDocument/hover", params).await?;
-    //
-    //         // Step 1: 转成 Hover 类型
-    //         let mut hover: Hover = serde_json::from_value(raw_result).ok()?;
-    //
-    //         // Step 2: 编辑 Hover 内容
-    //         match &mut hover.contents {
-    //             HoverContents::Scalar(MarkedString::String(s)) => {
-    //                 s.push_str("\n\n---\nEnhanced by proxy");
-    //             }
-    //             HoverContents::Scalar(MarkedString::LanguageString(ls)) => {
-    //                 ls.value.push_str("\n\n// Enhanced by proxy");
-    //             }
-    //             HoverContents::Array(arr) => {
-    //                 arr.push(MarkedString::String("Enhanced by proxy".into()));
-    //             }
-    //             _ => {}
-    //         }
-    //
-    //         // Step 3: 转回 JSON
-    //         let edited = serde_json::to_value(hover).ok()?;
-    //         Some(json!({ "result": edited }))
-    //     }
-    // }).await;
-
     dispatcher
-        .register_from_backend("initialize", handle_initialize)
+        .register_req_resp_from_backend::<Initialize>(handle_initialize)
         .await;
 }

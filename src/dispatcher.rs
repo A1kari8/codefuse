@@ -10,6 +10,8 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::UnboundedSender;
+use tower_lsp::lsp_types::request;
+use tower_lsp::lsp_types::notification;
 
 /// 调度器函数类型别名。
 ///
@@ -63,9 +65,27 @@ impl Dispatcher {
     ///
     /// # 参数
     ///
-    /// * `method` - 要处理的 LSP 方法名称
     /// * `handler` - 处理函数，接收消息和后端发送器
-    pub async fn register_from_frontend(&self, method: &str, handler: DispatcherFn) {
+    ///
+    /// # 类型参数
+    ///
+    /// * `T` - LSP 请求类型，必须实现 Request trait
+    pub async fn register_req_from_frontend<T>(&self, handler: DispatcherFn)
+    where
+        T: request::Request,
+    {
+        let method = T::METHOD;
+        self.handlers_from_frontend
+            .write()
+            .await
+            .insert(method.to_string(), handler);
+    }
+
+    pub async fn register_notification_from_frontend<T>(&self, handler: DispatcherFn)
+    where
+        T: notification::Notification,
+    {
+        let method = T::METHOD;
         self.handlers_from_frontend
             .write()
             .await
@@ -79,9 +99,27 @@ impl Dispatcher {
     ///
     /// # 参数
     ///
-    /// * `method` - 要处理的 LSP 方法名称
     /// * `handler` - 处理函数，接收消息和前端发送器
-    pub async fn register_from_backend(&self, method: &str, handler: DispatcherFn) {
+    ///
+    /// # 类型参数
+    ///
+    /// * `T` - LSP 请求类型，必须实现 Request trait
+    pub async fn register_req_resp_from_backend<T>(&self, handler: DispatcherFn)
+    where
+        T: request::Request,
+    {
+        let method = T::METHOD;
+        self.handlers_from_backend
+            .write()
+            .await
+            .insert(method.to_string(), handler);
+    }
+
+    pub async fn register_notification_from_backend<T>(&self, handler: DispatcherFn)
+    where
+        T: notification::Notification,
+    {
+        let method = T::METHOD;
         self.handlers_from_backend
             .write()
             .await
