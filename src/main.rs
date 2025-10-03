@@ -1,3 +1,14 @@
+//! # MyLSP - LSP 代理服务器
+//!
+//! 这个模块实现了一个LSP (Language Server Protocol) 代理服务器，用于在 VSCode 前端和 clangd 后端语言服务器之间进行通信和数据转发。
+//! 它允许对 LSP 消息进行拦截、修改和增强处理。
+//!
+//! ## 主要组件
+//!
+//! - `clangd_client`: 负责启动和管理 clangd 进程
+//! - `dispatcher`: 负责消息的分发和处理逻辑
+//! - `main`: 主程序入口，设置异步任务和消息循环
+
 mod clangd_client;
 mod dispatcher;
 
@@ -13,6 +24,20 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Stdin, 
 use tokio::process::{ChildStdin, ChildStdout};
 use tower_lsp::lsp_types::{InitializeResult, ServerInfo};
 
+/// 设置处理器函数，为特定的 LSP 方法注册处理逻辑。
+///
+/// 这个函数用于注册从后端（clangd）接收到的消息的处理函数。
+/// 目前注册了 `initialize` 方法的处理器，用于修改初始化响应。
+///
+/// # 参数
+///
+/// * `dispatcher` - 调度器实例，用于注册处理器
+///
+/// # 示例
+///
+/// ```rust
+/// setup_handlers(dispatcher.clone()).await;
+/// ```
 pub async fn setup_handlers(dispatcher: Arc<Dispatcher>) {
     // reg.register("textDocument/hover", move |params,clangd,vscode_out| {
     //     async move {
@@ -73,6 +98,23 @@ pub async fn setup_handlers(dispatcher: Arc<Dispatcher>) {
         .await;
 }
 
+/// 向后端（clangd）发送数据的异步任务。
+///
+/// 这个函数从接收器接收消息，并将其发送到 clangd 进程的标准输入。
+/// 它持续监听接收器，直到通道关闭。
+///
+/// # 参数
+///
+/// * `stdin` - clangd 进程的标准输入句柄
+/// * `rx` - 从调度器接收消息的通道接收器
+///
+/// # 返回
+///
+/// 返回 `Result<()>`，表示操作是否成功
+///
+/// # 错误
+///
+/// 如果写入或刷新失败，将返回错误
 async fn send_data_backend(mut stdin: ChildStdin, mut rx: mpsc::Receiver<String>) -> Result<()> {
     while let Some(message) = rx.recv().await {
         // 发送数据到外部程序
@@ -83,6 +125,23 @@ async fn send_data_backend(mut stdin: ChildStdin, mut rx: mpsc::Receiver<String>
     Ok(())
 }
 
+/// 从后端（clangd）接收数据的异步任务。
+///
+/// 这个函数读取 clangd 进程的标准输出，按照 LSP 协议解析消息头和消息体，
+/// 然后将解析后的 JSON 消息传递给调度器进行处理。
+///
+/// # 参数
+///
+/// * `stdout` - clangd 进程的标准输出缓冲读取器
+/// * `dispatcher` - 调度器实例，用于处理接收到的消息
+///
+/// # 返回
+///
+/// 返回 `Result<()>`，表示操作是否成功
+///
+/// # 错误
+///
+/// 如果读取、解析或处理消息失败，将返回错误
 async fn receive_data_backend(
     stdout: BufReader<ChildStdout>,
     dispatcher: Arc<Dispatcher>,
@@ -133,6 +192,23 @@ async fn receive_data_backend(
     }
 }
 
+/// 向前端（VSCode）发送数据的异步任务。
+///
+/// 这个函数从接收器接收消息，并将其发送到标准输出，供 VSCode 读取。
+/// 它持续监听接收器，直到通道关闭。
+///
+/// # 参数
+///
+/// * `stdout` - 标准输出句柄
+/// * `rx` - 从调度器接收消息的通道接收器
+///
+/// # 返回
+///
+/// 返回 `Result<()>`，表示操作是否成功
+///
+/// # 错误
+///
+/// 如果写入或刷新失败，将返回错误
 async fn send_data_frontend(mut stdout: Stdout, mut rx: mpsc::Receiver<String>) -> Result<()> {
     while let Some(message) = rx.recv().await {
         // 发送数据到vscode
@@ -143,6 +219,23 @@ async fn send_data_frontend(mut stdout: Stdout, mut rx: mpsc::Receiver<String>) 
     Ok(())
 }
 
+/// 从前端（VSCode）接收数据的异步任务。
+///
+/// 这个函数读取标准输入，按照 LSP 协议解析消息头和消息体，
+/// 然后将解析后的 JSON 消息传递给调度器进行处理。
+///
+/// # 参数
+///
+/// * `stdin` - 标准输入缓冲读取器
+/// * `dispatcher` - 调度器实例，用于处理接收到的消息
+///
+/// # 返回
+///
+/// 返回 `Result<()>`，表示操作是否成功
+///
+/// # 错误
+///
+/// 如果读取、解析或处理消息失败，将返回错误
 async fn receive_data_frontend(stdin: BufReader<Stdin>, dispatcher: Arc<Dispatcher>) -> Result<()> {
     let mut reader = stdin;
 
@@ -190,6 +283,22 @@ async fn receive_data_frontend(stdin: BufReader<Stdin>, dispatcher: Arc<Dispatch
     }
 }
 
+/// 主函数，程序的入口点。
+///
+/// 这个函数设置了整个 LSP 代理服务器的架构：
+/// - 启动 clangd 进程
+/// - 创建消息通道
+/// - 启动发送和接收数据的异步任务
+/// - 设置消息处理器
+/// - 等待任一任务完成
+///
+/// # 返回
+///
+/// 返回 `Result<(), Box<dyn std::error::Error>>`，表示程序是否成功运行
+///
+/// # 错误
+///
+/// 如果任何异步任务失败，将返回错误
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ClangdClient {
