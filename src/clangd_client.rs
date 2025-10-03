@@ -5,7 +5,7 @@
 
 use std::sync::atomic::AtomicU64;
 use tokio::io::BufReader;
-use tokio::process::{ChildStdin, ChildStdout, Command};
+use tokio::process::{ChildStdin, ChildStdout,ChildStderr,Command};
 
 /// Clangd 客户端结构体。
 ///
@@ -16,6 +16,7 @@ use tokio::process::{ChildStdin, ChildStdout, Command};
 pub struct ClangdClient {
     pub stdin: ChildStdin,
     pub stdout: BufReader<ChildStdout>,
+    pub stderr: BufReader<ChildStderr>,
     pub id_counter: AtomicU64,
 }
 
@@ -39,15 +40,18 @@ impl ClangdClient {
         let mut child = Command::new("clangd")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .spawn()
             .expect("Failed to start clangd");
 
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
+        let stderr = BufReader::new(child.stderr.take().unwrap());
 
         Self {
             stdin,
             stdout,
+            stderr,
             id_counter: AtomicU64::new(1),
         }
     }

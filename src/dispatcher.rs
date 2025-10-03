@@ -8,14 +8,14 @@ use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use tokio::sync::Mutex;
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::{Sender, UnboundedSender};
 
 /// 调度器函数类型别名。
 ///
 /// 这个类型表示一个异步处理器函数，它接收一个 JSON 值和一个发送器，
 /// 返回一个表示操作结果的 `BoxFuture`。
 type DispatcherFn =
-    Box<dyn Fn(Value, Sender<String>) -> BoxFuture<'static, Result<()>> + Send + Sync>;
+    Box<dyn Fn(Value, UnboundedSender<String>) -> BoxFuture<'static, Result<()>> + Send + Sync>;
 
 /// 消息调度器结构体。
 ///
@@ -27,8 +27,8 @@ type DispatcherFn =
 pub struct Dispatcher {
     handlers_from_frontend: Mutex<HashMap<String, DispatcherFn>>,
     handlers_from_backend: Mutex<HashMap<String, DispatcherFn>>,
-    backend_sender: Sender<String>,
-    frontend_sender: Sender<String>,
+    backend_sender: UnboundedSender<String>,
+    frontend_sender: UnboundedSender<String>,
     pending_requests: Mutex<HashMap<u64, String>>,
 }
 
@@ -43,7 +43,7 @@ impl Dispatcher {
     /// # 返回
     ///
     /// 返回初始化后的 `Dispatcher` 实例
-    pub fn new(backend_sender: Sender<String>, frontend_sender: Sender<String>) -> Self {
+    pub fn new(backend_sender: UnboundedSender<String>, frontend_sender: UnboundedSender<String>) -> Self {
         Self {
             handlers_from_frontend: Mutex::new(HashMap::new()),
             handlers_from_backend: Mutex::new(HashMap::new()),
@@ -69,7 +69,7 @@ impl Dispatcher {
     /// * `Fut` - 处理函数返回的 Future 类型
     pub async fn register_from_frontend<F, Fut>(&self, method: &str, handler: F)
     where
-        F: Fn(Value, Sender<String>) -> Fut + Send + Sync + 'static,
+        F: Fn(Value, UnboundedSender<String>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<()>> + Send + 'static,
     {
         let boxed: DispatcherFn =
@@ -96,7 +96,7 @@ impl Dispatcher {
     /// * `Fut` - 处理函数返回的 Future 类型
     pub async fn register_from_backend<F, Fut>(&self, method: &str, handler: F)
     where
-        F: Fn(Value, Sender<String>) -> Fut + Send + Sync + 'static,
+        F: Fn(Value, UnboundedSender<String>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<()>> + Send + 'static,
     {
         let boxed: DispatcherFn =
@@ -136,7 +136,7 @@ impl Dispatcher {
             handler(rpc, self.backend_sender.clone()).await
         } else {
             let message = Self::format_lsp_message(&rpc)?;
-            self.backend_sender.send(message).await?;
+            self.backend_sender.send(message)?;
             Ok(())
         }
     }
@@ -176,7 +176,7 @@ impl Dispatcher {
         }
 
         let message = Self::format_lsp_message(&rpc)?;
-        self.frontend_sender.send(message).await?;
+        self.frontend_sender.send(message)?;
         Ok(())
     }
 

@@ -13,6 +13,7 @@ mod clangd_client;
 mod dispatcher;
 
 use anyhow::{Context, Result};
+use log::{debug, error, info, warn};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -21,7 +22,7 @@ use crate::dispatcher::Dispatcher;
 use serde_json;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Stdin, Stdout};
-use tokio::process::{ChildStdin, ChildStdout};
+use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
 use tower_lsp::lsp_types::{InitializeResult, ServerInfo};
 
 /// 设置处理器函数，为特定的 LSP 方法注册处理逻辑。
@@ -91,7 +92,7 @@ pub async fn setup_handlers(dispatcher: Arc<Dispatcher>) {
 
                 // Step 3: 转回 JSON
                 let message = Dispatcher::format_lsp_message(&raw_rpc)?;
-                frontend_sender.send(message).await.unwrap();
+                frontend_sender.send(message)?;
                 Ok(())
             }
         })
@@ -115,12 +116,12 @@ pub async fn setup_handlers(dispatcher: Arc<Dispatcher>) {
 /// # 错误
 ///
 /// 如果写入或刷新失败，将返回错误
-async fn send_data_backend(mut stdin: ChildStdin, mut rx: mpsc::Receiver<String>) -> Result<()> {
+async fn send_data_backend(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<String>) -> Result<()> {
     while let Some(message) = rx.recv().await {
         // 发送数据到外部程序
         stdin.write_all(message.as_bytes()).await?;
         stdin.flush().await?;
-        eprintln!("已发送: {}", message);
+        info!("已发送: {}", message);
     }
     Ok(())
 }
@@ -186,7 +187,7 @@ async fn receive_data_backend(
         let dispatcher = dispatcher.clone();
         tokio::spawn(async move {
             if let Err(e) = dispatcher.handle_from_backend(json_body).await {
-                eprintln!("处理失败: {:?}", e);
+                error!("处理失败: {:?}", e);
             }
         });
     }
@@ -209,12 +210,12 @@ async fn receive_data_backend(
 /// # 错误
 ///
 /// 如果写入或刷新失败，将返回错误
-async fn send_data_frontend(mut stdout: Stdout, mut rx: mpsc::Receiver<String>) -> Result<()> {
+async fn send_data_frontend(mut stdout: Stdout, mut rx: mpsc::UnboundedReceiver<String>) -> Result<()> {
     while let Some(message) = rx.recv().await {
         // 发送数据到vscode
         stdout.write_all(message.as_bytes()).await?;
         stdout.flush().await?;
-        eprintln!("已发送: {}", message);
+        info!("已发送: {}", message);
     }
     Ok(())
 }
@@ -277,9 +278,40 @@ async fn receive_data_frontend(stdin: BufReader<Stdin>, dispatcher: Arc<Dispatch
         let dispatcher = dispatcher.clone();
         tokio::spawn(async move {
             if let Err(e) = dispatcher.handle_from_frontend(json_body).await {
-                eprintln!("前端消息处理失败: {:?}", e);
+                error!("前端消息处理失败: {:?}", e);
             }
         });
+    }
+}
+
+async fn pipe_clangd_stderr(stderr: BufReader<ChildStderr>) {
+    let mut lines = stderr.lines();
+
+    while let Ok(Some(line)) = lines.next_line().await {
+        // 示例：I[11:01:38.638] clangd version 21.1.0
+        let trimmed = line.trim();
+
+        if let Some((level, rest)) = parse_clangd_log_line(trimmed) {
+            match level {
+                'I' => info!("[clangd] {}", rest),
+                'W' => warn!("[clangd] {}", rest),
+                'E' => error!("[clangd] {}", rest),
+                'F' => error!("[clangd] FATAL: {}", rest),
+                _ => debug!("[clangd] {}", trimmed),
+            }
+        } else {
+            debug!("[clangd] {}", trimmed); // 无法解析，降级为 debug
+        }
+    }
+}
+
+fn parse_clangd_log_line(line: &str) -> Option<(char, &str)> {
+    if line.len() >= 15 {
+        let level = line.chars().next()?; // 第一个字符是日志等级
+        let rest = &line[15..]; // 跳过前缀
+        Some((level, rest.trim()))
+    } else {
+        None
     }
 }
 
@@ -301,18 +333,29 @@ async fn receive_data_frontend(stdin: BufReader<Stdin>, dispatcher: Arc<Dispatch
 /// 如果任何异步任务失败，将返回错误
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env_logger::Builder::new()
+        .filter_level(log::LevelFilter::Info)
+        .write_style(env_logger::WriteStyle::Always)
+        .target(env_logger::Target::Stderr) // 写入 stderr，避免污染 stdout
+        .init();
+
+    info!("Starting LSP proxy server...");
+
     let ClangdClient {
         stdin,
         stdout,
+        stderr,
         id_counter: _,
     } = ClangdClient::spawn().await;
+
+    tokio::spawn(pipe_clangd_stderr(stderr));
 
     // 读取 VSCode 请求
     let reader = BufReader::new(tokio::io::stdin());
     let writer = tokio::io::stdout();
 
-    let (backend_tx, backend_rx) = mpsc::channel::<String>(1000);
-    let (frontend_tx, frontend_rx) = mpsc::channel::<String>(1000);
+    let (backend_tx, backend_rx) = mpsc::unbounded_channel::<String>();
+    let (frontend_tx, frontend_rx) = mpsc::unbounded_channel::<String>();
 
     let send_backend_handle = tokio::spawn(send_data_backend(stdin, backend_rx));
     let send_frontend_handle = tokio::spawn(send_data_frontend(writer, frontend_rx));
@@ -327,22 +370,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::select! {
         result = send_backend_handle => {
             if let Err(e) = result {
-                eprintln!("后端发送任务失败: {:?}", e);
+                error!("后端发送任务失败: {:?}", e);
             }
         },
         result = send_frontend_handle => {
             if let Err(e) = result {
-                eprintln!("前端发送任务失败: {:?}", e);
+                error!("前端发送任务失败: {:?}", e);
             }
         },
         result = recv_backend_handle => {
             if let Err(e) = result {
-                eprintln!("后端接收任务失败: {:?}", e);
+                error!("后端接收任务失败: {:?}", e);
             }
         },
         result = recv_frontend_handle => {
             if let Err(e) = result {
-                eprintln!("前端接收任务失败: {:?}", e);
+                error!("前端接收任务失败: {:?}", e);
             }
         }
     }
