@@ -6,6 +6,8 @@
 use std::sync::atomic::AtomicU64;
 use tokio::io::BufReader;
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
+use log::{debug, error, info, warn};
+use tokio::io::AsyncBufReadExt;
 
 /// Clangd 客户端结构体。
 ///
@@ -54,5 +56,36 @@ impl ClangdClient {
             stderr,
             id_counter: AtomicU64::new(1),
         }
+    }
+}
+
+pub async fn pipe_clangd_stderr(stderr: BufReader<ChildStderr>) {
+    let mut lines = stderr.lines();
+
+    while let Ok(Some(line)) = lines.next_line().await {
+        // 示例：I[11:01:38.638] clangd version 21.1.0
+        let trimmed = line.trim();
+
+        if let Some((level, rest)) = parse_clangd_log_line(trimmed) {
+            match level {
+                'I' => info!("[clangd] {}", rest),
+                'W' => warn!("[clangd] {}", rest),
+                'E' => error!("[clangd] {}", rest),
+                'F' => error!("[clangd] FATAL: {}", rest),
+                _ => debug!("[clangd] {}", trimmed),
+            }
+        } else {
+            debug!("[clangd] {}", trimmed); // 无法解析，降级为 debug
+        }
+    }
+}
+
+fn parse_clangd_log_line(line: &str) -> Option<(char, &str)> {
+    if line.len() >= 15 {
+        let level = line.chars().next()?; // 第一个字符是日志等级
+        let rest = &line[15..]; // 跳过前缀
+        Some((level, rest.trim()))
+    } else {
+        None
     }
 }

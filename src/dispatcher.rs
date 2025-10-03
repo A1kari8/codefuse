@@ -15,8 +15,7 @@ use tokio::sync::mpsc::UnboundedSender;
 ///
 /// 这个类型表示一个异步处理器函数，它接收一个 JSON 值和一个发送器，
 /// 返回一个表示操作结果的 `BoxFuture`。
-type DispatcherFn =
-    Box<dyn Fn(Value, UnboundedSender<String>) -> BoxFuture<'static, Result<()>> + Send + Sync>;
+type DispatcherFn = fn(Value, UnboundedSender<String>) -> BoxFuture<'static, Result<()>>;
 
 /// 消息调度器结构体。
 ///
@@ -66,22 +65,11 @@ impl Dispatcher {
     ///
     /// * `method` - 要处理的 LSP 方法名称
     /// * `handler` - 处理函数，接收消息和后端发送器
-    ///
-    /// # 类型参数
-    ///
-    /// * `F` - 处理函数类型
-    /// * `Fut` - 处理函数返回的 Future 类型
-    pub async fn register_from_frontend<F, Fut>(&self, method: &str, handler: F)
-    where
-        F: Fn(Value, UnboundedSender<String>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<()>> + Send + 'static,
-    {
-        let boxed: DispatcherFn =
-            Box::new(move |rpc, backend_sender| Box::pin(handler(rpc, backend_sender.clone())));
+    pub async fn register_from_frontend(&self, method: &str, handler: DispatcherFn) {
         self.handlers_from_frontend
             .write()
             .await
-            .insert(method.to_string(), boxed);
+            .insert(method.to_string(), handler);
     }
 
     /// 注册来自后端的处理器。
@@ -93,22 +81,11 @@ impl Dispatcher {
     ///
     /// * `method` - 要处理的 LSP 方法名称
     /// * `handler` - 处理函数，接收消息和前端发送器
-    ///
-    /// # 类型参数
-    ///
-    /// * `F` - 处理函数类型
-    /// * `Fut` - 处理函数返回的 Future 类型
-    pub async fn register_from_backend<F, Fut>(&self, method: &str, handler: F)
-    where
-        F: Fn(Value, UnboundedSender<String>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<()>> + Send + 'static,
-    {
-        let boxed: DispatcherFn =
-            Box::new(move |rpc, frontend_sender| Box::pin(handler(rpc, frontend_sender.clone())));
+    pub async fn register_from_backend(&self, method: &str, handler: DispatcherFn) {
         self.handlers_from_backend
             .write()
             .await
-            .insert(method.to_string(), boxed);
+            .insert(method.to_string(), handler);
     }
 
     /// 处理来自前端的消息。
