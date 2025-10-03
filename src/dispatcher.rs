@@ -9,8 +9,8 @@ type DispatcherFn =
     Box<dyn Fn(Value, Sender<String>) -> BoxFuture<'static, Result<()>> + Send + Sync>;
 
 pub struct Dispatcher {
-    backend_handlers: Mutex<HashMap<String, DispatcherFn>>,
-    frontend_handlers: Mutex<HashMap<String, DispatcherFn>>,
+    handlers_from_frontend: Mutex<HashMap<String, DispatcherFn>>,
+    handlers_from_backend: Mutex<HashMap<String, DispatcherFn>>,
     backend_sender: Sender<String>,
     frontend_sender: Sender<String>,
     pending_requests: Mutex<HashMap<u64, String>>,
@@ -19,8 +19,8 @@ pub struct Dispatcher {
 impl Dispatcher {
     pub fn new(backend_sender: Sender<String>, frontend_sender: Sender<String>) -> Self {
         Self {
-            backend_handlers: Mutex::new(HashMap::new()),
-            frontend_handlers: Mutex::new(HashMap::new()),
+            handlers_from_frontend: Mutex::new(HashMap::new()),
+            handlers_from_backend: Mutex::new(HashMap::new()),
             backend_sender,
             frontend_sender,
             pending_requests: Mutex::new(HashMap::new()),
@@ -34,7 +34,7 @@ impl Dispatcher {
     {
         let boxed: DispatcherFn =
             Box::new(move |rpc, backend_sender| Box::pin(handler(rpc, backend_sender.clone())));
-        self.backend_handlers
+        self.handlers_from_frontend
             .lock()
             .await
             .insert(method.to_string(), boxed);
@@ -47,7 +47,7 @@ impl Dispatcher {
     {
         let boxed: DispatcherFn =
             Box::new(move |rpc, frontend_sender| Box::pin(handler(rpc, frontend_sender.clone())));
-        self.frontend_handlers
+        self.handlers_from_backend
             .lock()
             .await
             .insert(method.to_string(), boxed);
@@ -65,7 +65,7 @@ impl Dispatcher {
         }
 
         let method = rpc.get("method").and_then(|m| m.as_str()).unwrap_or("");
-        if let Some(handler) = self.backend_handlers.lock().await.get(method) {
+        if let Some(handler) = self.handlers_from_frontend.lock().await.get(method) {
             handler(rpc, self.backend_sender.clone()).await
         } else {
             let message = Self::format_lsp_message(&rpc)?;
@@ -91,7 +91,7 @@ impl Dispatcher {
 
         // 如果有 method 且注册了处理器，调用；否则直接转发
         if let Some(method) = method {
-            if let Some(handler) = self.frontend_handlers.lock().await.get(&method) {
+            if let Some(handler) = self.handlers_from_backend.lock().await.get(&method) {
                 return handler(rpc, self.frontend_sender.clone()).await;
             }
         }
