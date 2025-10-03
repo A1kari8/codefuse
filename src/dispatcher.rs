@@ -4,11 +4,12 @@
 //! 它支持注册自定义处理器来拦截和修改特定类型的消息。
 
 use anyhow::Result;
+use dashmap::DashMap;
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use tokio::sync::Mutex;
-use tokio::sync::mpsc::{Sender, UnboundedSender};
+use tokio::sync::RwLock;
+use tokio::sync::mpsc::UnboundedSender;
 
 /// 调度器函数类型别名。
 ///
@@ -25,11 +26,11 @@ type DispatcherFn =
 /// - 转发未处理的消息
 /// - 管理待处理的请求
 pub struct Dispatcher {
-    handlers_from_frontend: Mutex<HashMap<String, DispatcherFn>>,
-    handlers_from_backend: Mutex<HashMap<String, DispatcherFn>>,
+    handlers_from_frontend: RwLock<HashMap<String, DispatcherFn>>,
+    handlers_from_backend: RwLock<HashMap<String, DispatcherFn>>,
     backend_sender: UnboundedSender<String>,
     frontend_sender: UnboundedSender<String>,
-    pending_requests: Mutex<HashMap<u64, String>>,
+    pending_requests: DashMap<u64, String>,
 }
 
 impl Dispatcher {
@@ -43,13 +44,16 @@ impl Dispatcher {
     /// # 返回
     ///
     /// 返回初始化后的 `Dispatcher` 实例
-    pub fn new(backend_sender: UnboundedSender<String>, frontend_sender: UnboundedSender<String>) -> Self {
+    pub fn new(
+        backend_sender: UnboundedSender<String>,
+        frontend_sender: UnboundedSender<String>,
+    ) -> Self {
         Self {
-            handlers_from_frontend: Mutex::new(HashMap::new()),
-            handlers_from_backend: Mutex::new(HashMap::new()),
+            handlers_from_frontend: RwLock::new(HashMap::new()),
+            handlers_from_backend: RwLock::new(HashMap::new()),
             backend_sender,
             frontend_sender,
-            pending_requests: Mutex::new(HashMap::new()),
+            pending_requests: DashMap::new(),
         }
     }
 
@@ -75,7 +79,7 @@ impl Dispatcher {
         let boxed: DispatcherFn =
             Box::new(move |rpc, backend_sender| Box::pin(handler(rpc, backend_sender.clone())));
         self.handlers_from_frontend
-            .lock()
+            .write()
             .await
             .insert(method.to_string(), boxed);
     }
@@ -102,7 +106,7 @@ impl Dispatcher {
         let boxed: DispatcherFn =
             Box::new(move |rpc, frontend_sender| Box::pin(handler(rpc, frontend_sender.clone())));
         self.handlers_from_backend
-            .lock()
+            .write()
             .await
             .insert(method.to_string(), boxed);
     }
@@ -124,15 +128,12 @@ impl Dispatcher {
         // 如果是请求（有 id 和 method），记录到字典
         if let (Some(id_val), Some(method_val)) = (rpc.get("id"), rpc.get("method")) {
             if let (Some(id), Some(method)) = (id_val.as_u64(), method_val.as_str()) {
-                self.pending_requests
-                    .lock()
-                    .await
-                    .insert(id, method.to_string());
+                self.pending_requests.insert(id, method.to_string());
             }
         }
 
         let method = rpc.get("method").and_then(|m| m.as_str()).unwrap_or("");
-        if let Some(handler) = self.handlers_from_frontend.lock().await.get(method) {
+        if let Some(handler) = self.handlers_from_frontend.read().await.get(method) {
             handler(rpc, self.backend_sender.clone()).await
         } else {
             let message = Self::format_lsp_message(&rpc)?;
@@ -157,8 +158,7 @@ impl Dispatcher {
         // 统一获取 method：如果是响应，从字典中查找；如果是通知，从消息中获取
         let method = if let Some(id_val) = rpc.get("id") {
             if let Some(id) = id_val.as_u64() {
-                let mut pending = self.pending_requests.lock().await;
-                pending.remove(&id) // 获取并移除
+                self.pending_requests.remove(&id).map(|(_, v)| v) // 获取并移除
             } else {
                 None
             }
@@ -170,7 +170,7 @@ impl Dispatcher {
 
         // 如果有 method 且注册了处理器，调用；否则直接转发
         if let Some(method) = method {
-            if let Some(handler) = self.handlers_from_backend.lock().await.get(&method) {
+            if let Some(handler) = self.handlers_from_backend.read().await.get(&method) {
                 return handler(rpc, self.frontend_sender.clone()).await;
             }
         }

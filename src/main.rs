@@ -15,7 +15,7 @@ mod dispatcher;
 use anyhow::{Context, Result};
 use log::{debug, error, info, warn};
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 
 use crate::clangd_client::ClangdClient;
 use crate::dispatcher::Dispatcher;
@@ -116,7 +116,10 @@ pub async fn setup_handlers(dispatcher: Arc<Dispatcher>) {
 /// # 错误
 ///
 /// 如果写入或刷新失败，将返回错误
-async fn send_data_backend(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<String>) -> Result<()> {
+async fn send_data_backend(
+    mut stdin: ChildStdin,
+    mut rx: mpsc::UnboundedReceiver<String>,
+) -> Result<()> {
     while let Some(message) = rx.recv().await {
         // 发送数据到外部程序
         stdin.write_all(message.as_bytes()).await?;
@@ -146,6 +149,7 @@ async fn send_data_backend(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceive
 async fn receive_data_backend(
     stdout: BufReader<ChildStdout>,
     dispatcher: Arc<Dispatcher>,
+    semaphore: Arc<Semaphore>,
 ) -> Result<()> {
     let mut reader = stdout;
 
@@ -178,10 +182,15 @@ async fn receive_data_backend(
         // 2. 读取 body
         let mut body_buf = vec![0u8; content_length];
         reader.read_exact(&mut body_buf).await?;
-        let body_str = String::from_utf8(body_buf).context("UTF-8 解码失败")?;
+        // let body_str = String::from_utf8(body_buf).context("UTF-8 解码失败")?;
 
         // 3. 解析 JSON
-        let json_body: Value = serde_json::from_str(&body_str).context("JSON 解析失败")?;
+        // let json_body: Value = serde_json::from_str(&body_str).context("JSON 解析失败")?;
+        let json_body: Value = serde_json::from_slice(&body_buf).context("JSON 解析失败")?;
+
+        // 限制并发：获取许可
+        let permit = semaphore.clone().acquire_owned().await?;
+        let _ = permit;
 
         // 5. 并发处理
         let dispatcher = dispatcher.clone();
@@ -210,7 +219,10 @@ async fn receive_data_backend(
 /// # 错误
 ///
 /// 如果写入或刷新失败，将返回错误
-async fn send_data_frontend(mut stdout: Stdout, mut rx: mpsc::UnboundedReceiver<String>) -> Result<()> {
+async fn send_data_frontend(
+    mut stdout: Stdout,
+    mut rx: mpsc::UnboundedReceiver<String>,
+) -> Result<()> {
     while let Some(message) = rx.recv().await {
         // 发送数据到vscode
         stdout.write_all(message.as_bytes()).await?;
@@ -237,7 +249,11 @@ async fn send_data_frontend(mut stdout: Stdout, mut rx: mpsc::UnboundedReceiver<
 /// # 错误
 ///
 /// 如果读取、解析或处理消息失败，将返回错误
-async fn receive_data_frontend(stdin: BufReader<Stdin>, dispatcher: Arc<Dispatcher>) -> Result<()> {
+async fn receive_data_frontend(
+    stdin: BufReader<Stdin>,
+    dispatcher: Arc<Dispatcher>,
+    semaphore: Arc<Semaphore>,
+) -> Result<()> {
     let mut reader = stdin;
 
     loop {
@@ -269,10 +285,14 @@ async fn receive_data_frontend(stdin: BufReader<Stdin>, dispatcher: Arc<Dispatch
         // 2. 读取 body
         let mut body_buf = vec![0u8; content_length];
         reader.read_exact(&mut body_buf).await?;
-        let body_str = String::from_utf8(body_buf).context("UTF-8 解码失败")?;
+        // let body_str = String::from_utf8(body_buf).context("UTF-8 解码失败")?;
 
         // 3. 解析 JSON
-        let json_body: Value = serde_json::from_str(&body_str).context("JSON 解析失败")?;
+        // let json_body: Value = serde_json::from_str(&body_str).context("JSON 解析失败")?;
+        let json_body: Value = serde_json::from_slice(&body_buf).context("JSON 解析失败")?;
+
+        let permit = semaphore.clone().acquire_owned().await?;
+        let _ = permit;
 
         // 5. 并发处理
         let dispatcher = dispatcher.clone();
@@ -332,10 +352,11 @@ fn parse_clangd_log_line(line: &str) -> Option<(char, &str)> {
 ///
 /// 如果任何异步任务失败，将返回错误
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<()> {
     env_logger::Builder::new()
+        .format_timestamp_secs()
         .filter_level(log::LevelFilter::Info)
-        .write_style(env_logger::WriteStyle::Always)
+        .write_style(env_logger::WriteStyle::Auto)
         .target(env_logger::Target::Stderr) // 写入 stderr，避免污染 stdout
         .init();
 
@@ -362,8 +383,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let dispatcher = Arc::new(Dispatcher::new(backend_tx, frontend_tx));
 
-    let recv_backend_handle = tokio::spawn(receive_data_backend(stdout, Arc::clone(&dispatcher)));
-    let recv_frontend_handle = tokio::spawn(receive_data_frontend(reader, Arc::clone(&dispatcher)));
+    let semaphore = Arc::new(Semaphore::new(15)); // 限制最多 10 个并发任务
+
+    let recv_backend_handle = tokio::spawn(receive_data_backend(
+        stdout,
+        Arc::clone(&dispatcher),
+        Arc::clone(&semaphore),
+    ));
+    let recv_frontend_handle = tokio::spawn(receive_data_frontend(
+        reader,
+        Arc::clone(&dispatcher),
+        Arc::clone(&semaphore),
+    ));
 
     setup_handlers(Arc::clone(&dispatcher)).await;
 
