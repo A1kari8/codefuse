@@ -11,6 +11,7 @@ futures = "0.3.31"
 env_logger = "0.11.8"
 log = "0.4.28"
 dashmap = "6.1.0"
+chrono = "0.4.42"
 
 [dependencies.tower-lsp]
 version = "0.20.0"

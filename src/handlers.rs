@@ -1,9 +1,7 @@
-use anyhow;
 use futures::future::BoxFuture;
-use serde_json;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tower_lsp::lsp_types::{notification::{DidOpenTextDocument, Notification}, request::Initialize, InitializeResult, ServerInfo};
+use tower_lsp::lsp_types::{request::Initialize, InitializeResult, ServerInfo};
 
 use crate::dispatcher::Dispatcher;
 
@@ -66,6 +64,6 @@ fn handle_initialize(
 /// ```
 pub async fn setup_handlers(dispatcher: Arc<Dispatcher>) {
     dispatcher
-        .register_req_resp_from_backend::<Initialize>(handle_initialize)
+        .register_resp_from_backend::<Initialize>(handle_initialize)
         .await;
 }

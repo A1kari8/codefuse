@@ -9,21 +9,25 @@
 //! - `dispatcher`: 负责消息的分发和处理逻辑
 //! - `main`: 主程序入口，设置异步任务和消息循环
 
-mod clangd_client;
+mod lsp_backend;
 mod dispatcher;
 mod handlers;
 mod tasks;
 
-use anyhow::Result;
-use log::{error, info};
-use std::sync::Arc;
-use tokio::io::BufReader;
-use tokio::sync::{Semaphore, mpsc};
-
-use crate::clangd_client::{ClangdClient, pipe_clangd_stderr};
+use crate::lsp_backend::{LspBackend, pipe_lsp_backend_stderr};
 use crate::dispatcher::Dispatcher;
 use crate::handlers::setup_handlers;
 use crate::tasks::*;
+use anyhow::Result;
+use chrono::Local;
+use env_logger::TimestampPrecision;
+use env_logger::fmt::style::{AnsiColor, Color};
+use log::{error, info};
+use std::fmt::Debug;
+use std::io::Write;
+use std::sync::Arc;
+use tokio::io::BufReader;
+use tokio::sync::{Semaphore, mpsc};
 
 /// 主函数，程序的入口点。
 ///
@@ -44,7 +48,18 @@ use crate::tasks::*;
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::Builder::new()
-        .format_timestamp_secs()
+        .format(|buf, record| {
+            let style = buf.default_level_style(record.level());
+            write!(buf, "[{} ", Local::now().format("%H:%M:%S"))?;
+            write!(buf, "{}", style)?;
+            write!(buf, "{} \x1b[0m", record.level())?;
+            writeln!(
+                buf,
+                "{}] {}",
+                record.module_path().unwrap_or(env!("CARGO_PKG_NAME")),
+                record.args()
+            )
+        })
         .filter_level(log::LevelFilter::Info)
         .write_style(env_logger::WriteStyle::Auto)
         .target(env_logger::Target::Stderr) // 写入 stderr，避免污染 stdout
@@ -52,14 +67,14 @@ async fn main() -> Result<()> {
 
     info!("Starting LSP proxy server...");
 
-    let ClangdClient {
+    let LspBackend {
         stdin,
         stdout,
         stderr,
         id_counter: _,
-    } = ClangdClient::spawn().await;
+    } = LspBackend::spawn("clangd").await;
 
-    tokio::spawn(pipe_clangd_stderr(stderr));
+    tokio::spawn(pipe_lsp_backend_stderr(stderr));
 
     // 读取 VSCode 请求
     let reader = BufReader::new(tokio::io::stdin());

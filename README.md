@@ -1,6 +1,6 @@
-# CodeFuse LSP Proxy
+# LSP Proxy
 
-CodeFuse 是一个基于 Rust 的 LSP (Language Server Protocol) 代理服务器，充当 VSCode 和 clangd 语言服务器之间的中间层。它允许你拦截、修改和增强 LSP 消息流，提供自定义的语言服务器功能
+一个基于 Rust 的 LSP (Language Server Protocol) 代理服务器，充当 VSCode 和 clangd 语言服务器之间的中间层。它允许你拦截、修改和增强 LSP 消息流，提供自定义的语言服务器功能
 
 ## 功能特性
 
@@ -10,20 +10,9 @@ CodeFuse 是一个基于 Rust 的 LSP (Language Server Protocol) 代理服务器
 - 基于 tokio 的异步运行时
 - 编译时类型安全的处理器注册
 
-## 依赖
-
-CodeFuse 依赖以下主要 crate：
-
-- `tokio`: 异步运行时
-- `tower-lsp`: LSP 类型定义和协议处理
-- `serde_json`: JSON 序列化和反序列化
-- `futures`: 异步 Future 工具
-- `anyhow`: 错误处理
-- `dashmap`: 并发安全的 HashMap
-
 ## 使用
 
-CodeFuse 作为 LSP 服务器运行，可以配置在 VSCode 中使用
+Proxy 作为 LSP 服务器运行，可以配置在 VSCode 中使用
 
 ## 项目结构
 
@@ -40,7 +29,7 @@ src/
 
 ### 注册 Dispatcher
 
-CodeFuse 的核心功能是通过注册处理器来实现的。处理器允许你拦截和修改 LSP 消息
+Proxy 的核心功能是通过注册处理器来实现的。处理器允许你拦截和修改 LSP 消息
 
 #### 基本概念
 
@@ -115,12 +104,12 @@ fn(Value, UnboundedSender<String>) -> BoxFuture<'static, Result<()>>
 
 ```rust
 // 请求处理器
-dispatcher.register_req_resp_from_backend::<Initialize>(handler).await;      // 处理初始化响应
+dispatcher.register_resp_from_backend::<Initialize>(handler).await;      // 处理初始化响应
 dispatcher.register_req_from_frontend::<HoverRequest>(handler).await;   // 处理悬停请求
 
 // 通知处理器
-dispatcher.register_notification_from_frontend::<DidOpenTextDocument>(handler).await;  // 处理文档打开通知
-dispatcher.register_notification_from_backend::<PublishDiagnostics>(handler).await;    // 处理诊断通知
+dispatcher.register_notify_from_frontend::<DidOpenTextDocument>(handler).await;  // 处理文档打开通知
+dispatcher.register_notify_from_backend::<PublishDiagnostics>(handler).await;    // 处理诊断通知
 ```
 
 #### 消息格式
@@ -188,6 +177,6 @@ fn handle_did_open(
 
 // 在 setup_handlers 中注册
 dispatcher
-    .register_from_frontend_notification::<DidOpenTextDocument>(handle_did_open)
+    .register_notify_from_frontend::<DidOpenTextDocument>(handle_did_open)
     .await;
 ```

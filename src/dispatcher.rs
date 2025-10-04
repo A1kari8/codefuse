@@ -70,6 +70,7 @@ impl Dispatcher {
     /// # 类型参数
     ///
     /// * `T` - LSP 请求类型，必须实现 Request trait
+    #[allow(dead_code)]
     pub async fn register_req_from_frontend<T>(&self, handler: DispatcherFn)
     where
         T: request::Request,
@@ -81,7 +82,8 @@ impl Dispatcher {
             .insert(method.to_string(), handler);
     }
 
-    pub async fn register_notification_from_frontend<T>(&self, handler: DispatcherFn)
+    #[allow(dead_code)]
+    pub async fn register_notify_from_frontend<T>(&self, handler: DispatcherFn)
     where
         T: notification::Notification,
     {
@@ -104,7 +106,8 @@ impl Dispatcher {
     /// # 类型参数
     ///
     /// * `T` - LSP 请求类型，必须实现 Request trait
-    pub async fn register_req_resp_from_backend<T>(&self, handler: DispatcherFn)
+    #[allow(dead_code)]
+    pub async fn register_resp_from_backend<T>(&self, handler: DispatcherFn)
     where
         T: request::Request,
     {
@@ -115,7 +118,8 @@ impl Dispatcher {
             .insert(method.to_string(), handler);
     }
 
-    pub async fn register_notification_from_backend<T>(&self, handler: DispatcherFn)
+    #[allow(dead_code)]
+    pub async fn register_notify_from_backend<T>(&self, handler: DispatcherFn)
     where
         T: notification::Notification,
     {
@@ -141,11 +145,11 @@ impl Dispatcher {
     /// 返回 `Result<()>`，表示处理是否成功
     pub async fn handle_from_frontend(&self, rpc: Value) -> Result<()> {
         // 如果是请求（有 id 和 method），记录到字典
-        if let (Some(id_val), Some(method_val)) = (rpc.get("id"), rpc.get("method")) {
-            if let (Some(id), Some(method)) = (id_val.as_u64(), method_val.as_str()) {
+        if let (Some(id_val), Some(method_val)) = (rpc.get("id"), rpc.get("method"))
+            && let (Some(id), Some(method)) = (id_val.as_u64(), method_val.as_str()) {
                 self.pending_requests.insert(id, method.to_string());
             }
-        }
+
 
         let method = rpc.get("method").and_then(|m| m.as_str()).unwrap_or("");
         if let Some(handler) = self.handlers_from_frontend.read().await.get(method) {
@@ -184,11 +188,11 @@ impl Dispatcher {
         };
 
         // 如果有 method 且注册了处理器，调用；否则直接转发
-        if let Some(method) = method {
-            if let Some(handler) = self.handlers_from_backend.read().await.get(&method) {
+        if let Some(method) = method
+            && let Some(handler) = self.handlers_from_backend.read().await.get(&method) {
                 return handler(rpc, self.frontend_sender.clone()).await;
             }
-        }
+
 
         let message = Self::format_lsp_message(&rpc)?;
         self.frontend_sender.send(message)?;
@@ -206,6 +210,7 @@ impl Dispatcher {
     /// # 返回
     ///
     /// 返回格式化后的 JSON 值
+    #[allow(dead_code)]
     pub fn format_notification_or_request(rpc: &Value) -> Value {
         let params = rpc.get("params").cloned().unwrap_or(json!(null));
         let method = rpc.get("method").cloned().unwrap_or(json!(null));
@@ -240,6 +245,7 @@ impl Dispatcher {
     /// # 返回
     ///
     /// 返回格式化后的 JSON 值
+    #[allow(dead_code)]
     pub fn format_result(rpc: Value) -> Value {
         let params = rpc.get("params").cloned().unwrap_or(json!(null));
         let method = params.get("method").cloned().unwrap_or(json!(null));
