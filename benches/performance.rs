@@ -4,7 +4,7 @@ use std::hint::black_box;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use codefuse::dispatcher::Dispatcher;
+use lsp_proxy::dispatcher::Dispatcher;
 
 fn bench_json_parsing(c: &mut Criterion) {
     println!("Starting bench_json_parsing");

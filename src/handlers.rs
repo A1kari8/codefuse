@@ -31,7 +31,7 @@ fn handle_initialize(
         let mut init_result: InitializeResult = serde_json::from_value(raw_result)?;
 
         init_result.server_info = Some(ServerInfo {
-            name: "codefuse".into(),
+            name: "lsp-proxy".into(),
             version: Some("0.1.0".into()),
         });
 

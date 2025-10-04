@@ -67,7 +67,7 @@ fn handle_initialize(
 
         // 修改服务器信息
         init_result.server_info = Some(ServerInfo {
-            name: "codefuse".into(),
+            name: "lsp-proxy".into(),
             version: Some("0.1.0".into()),
         });
 

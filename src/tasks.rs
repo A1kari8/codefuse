@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use log::{error, info};
+use log::{error, info, trace};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Stdin, Stdout};
@@ -33,7 +33,7 @@ pub async fn send_data_backend(
         // 发送数据到外部程序
         stdin.write_all(message.as_bytes()).await?;
         stdin.flush().await?;
-        info!("已发送: {}", message);
+        trace!("已发送: {}", message);
     }
     Ok(())
 }
@@ -136,7 +136,7 @@ pub async fn send_data_frontend(
         // 发送数据到vscode
         stdout.write_all(message.as_bytes()).await?;
         stdout.flush().await?;
-        info!("已发送: {}", message);
+        trace!("已发送: {}", message);
     }
     Ok(())
 }

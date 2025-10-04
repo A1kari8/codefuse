@@ -7,7 +7,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
-use codefuse::dispatcher::Dispatcher;
+use lsp_proxy::dispatcher::Dispatcher;
 use serde_json::json;
 
 #[tokio::test]
